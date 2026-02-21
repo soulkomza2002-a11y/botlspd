@@ -167,7 +167,7 @@ async def before_auto_sync():
     await bot.wait_until_ready()
 
 # ─── /sync ────────────────────────────────────────────────────────────────────
-@bot.slash_command(name="sync", description="Ręczna synchronizacja ról LSPD", guild_ids=[GUILD_ID])
+@nextcord.slash_command(name="sync", description="Ręczna synchronizacja ról LSPD", guild_ids=[GUILD_ID])
 async def cmd_sync(interaction: nextcord.Interaction):
     if not interaction.user.guild_permissions.manage_roles:
         await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
@@ -182,8 +182,10 @@ async def cmd_sync(interaction: nextcord.Interaction):
     for embed in build_embeds(results, duration):
         await interaction.followup.send(embed=embed)
 
+bot.add_application_command(cmd_sync)
+
 # ─── /status ──────────────────────────────────────────────────────────────────
-@bot.slash_command(name="status", description="Status bota LSPD", guild_ids=[GUILD_ID])
+@nextcord.slash_command(name="status", description="Status bota LSPD", guild_ids=[GUILD_ID])
 async def cmd_status(interaction: nextcord.Interaction):
     await interaction.response.defer()
     officers = await fetch_officers()
@@ -193,8 +195,10 @@ async def cmd_status(interaction: nextcord.Interaction):
     embed.add_field(name="👥 Członków",    value=str(interaction.guild.member_count), inline=True)
     await interaction.followup.send(embed=embed)
 
+bot.add_application_command(cmd_status)
+
 # ─── /kto ─────────────────────────────────────────────────────────────────────
-@bot.slash_command(name="kto", description="Sprawdź stopień osoby w bazie LSPD", guild_ids=[GUILD_ID])
+@nextcord.slash_command(name="kto", description="Sprawdź stopień osoby w bazie LSPD", guild_ids=[GUILD_ID])
 async def cmd_kto(interaction: nextcord.Interaction, member: nextcord.Member):
     await interaction.response.defer()
     officers = await fetch_officers()
@@ -213,6 +217,8 @@ async def cmd_kto(interaction: nextcord.Interaction, member: nextcord.Member):
     if units:
         embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
     await interaction.followup.send(embed=embed)
+
+bot.add_application_command(cmd_kto)
 
 # ─── ON READY ─────────────────────────────────────────────────────────────────
 @bot.event
