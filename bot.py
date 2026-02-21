@@ -56,9 +56,7 @@ STATUS_RED_ENTRY   = "CZERWONY WPIS"
 STATUS_YELLOW_ENTRY = "ŻÓŁTY WPIS"
 ALL_STATUS_ROLES   = {STATUS_SUSPENDED, STATUS_RED_ENTRY, STATUS_YELLOW_ENTRY}
 
-# ─── ROLA REKRUTA I PRZEDZIAŁY ODZNAK ────────────────────────────────────────
-XLSPD_ROLE = "xLSPD"   # rola na DC oznaczająca nowego rekruta
-
+# ─── PRZEDZIAŁY ODZNAK ───────────────────────────────────────────────────────
 RANK_BADGE_RANGES = {
     "Chief of Police": (1,   9),
     "Assistant Chief": (1,   9),
@@ -136,64 +134,6 @@ async def save_officers(officers: list) -> bool:
     except Exception as e:
         log.error(f"JSONBin save error: {e}")
         return False
-
-# ─── AUTO-REKRUTACJA (xLSPD → baza) ─────────────────────────────────────────
-async def auto_recruit(guild: nextcord.Guild) -> dict:
-    """Wykrywa członków z rolą xLSPD którzy nie są w bazie i dodaje ich jako Cadet."""
-    # Szukaj roli case-insensitive
-    xlspd_role = nextcord.utils.find(lambda r: r.name.lower() == XLSPD_ROLE.lower(), guild.roles)
-    if not xlspd_role:
-        all_roles = ", ".join(r.name for r in guild.roles)
-        return {"added": [], "errors": [f"Brak roli '{XLSPD_ROLE}' na serwerze. Dostępne role: {all_roles}"]}
-
-    officers = await fetch_officers()
-    existing_nicks = {(o.get("nick") or "").strip().lower() for o in officers}
-
-    results = {"added": [], "errors": [], "skipped": []}
-
-    for member in guild.members:
-        if member.bot:
-            continue
-        if xlspd_role not in member.roles:
-            continue
-        if member.name.lower() in existing_nicks:
-            results["skipped"].append(f"{member.name} (już w bazie)")
-            continue
-
-        # Nowy rekrut — wykryj stopień z ról Discord, jeśli brak zostaw puste
-        detected_rank = ""
-        for role in member.roles:
-            if role.name in RANK_TO_ROLE:
-                detected_rank = role.name
-                break
-
-        new_officer = {
-            "id":           int(datetime.now().timestamp() * 1000) + len(officers),
-            "badge":        "",
-            "name":         "",
-            "nick":         member.name,
-            "rank":         detected_rank,
-            "dept":         "LSPD",
-            "suspended":    False,
-            "redEntry":     False,
-            "yellowEntry":  False,
-            "onLeave":      False,
-            "swat": False, "iad": False, "ftd": False,
-            "fac":  False, "seu": False, "sv":  False,
-            "nt":   False, "pwc": False, "wu":  False, "k9": False,
-            "notes": ""
-        }
-        officers.append(new_officer)
-        existing_nicks.add(member.name.lower())
-        results["added"].append(member.name)
-        log.info(f"[REKRUT] Dodano {member.name} do bazy")
-
-    if results["added"]:
-        ok = await save_officers(officers)
-        if not ok:
-            results["errors"].append("Błąd zapisu do JSONBin")
-
-    return results
 
 # ─── BUDOWANIE PSEUDONIMU ─────────────────────────────────────────────────────
 def build_nickname(officer: dict) -> str:
@@ -391,17 +331,6 @@ async def auto_sync():
         return
     t = asyncio.get_event_loop().time()
 
-    # Najpierw sprawdź nowych rekrutów z rolą xLSPD
-    recruit_results = await auto_recruit(guild)
-    if recruit_results["added"]:
-        log.info(f"[REKRUT] Dodano {len(recruit_results['added'])} nowych: {recruit_results['added']}")
-        if LOG_CHANNEL_ID:
-            ch = guild.get_channel(LOG_CHANNEL_ID)
-            if ch:
-                desc = "\n".join(f"• {a}" for a in recruit_results["added"])
-                embed = nextcord.Embed(title="🆕 Nowi rekruci dodani do bazy", description=desc, color=nextcord.Color.green())
-                await ch.send(embed=embed)
-
     results = await sync_roles(guild)
     duration = asyncio.get_event_loop().time() - t
     upd = len(results.get("updated", []))
@@ -463,34 +392,6 @@ class LSPDCog(commands.Cog):
         embed.add_field(name="Status",  value=status,                       inline=True)
         if units:
             embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
-        await interaction.followup.send(embed=embed)
-
-    @slash_command(name="rekrutuj", description="Ręcznie skanuj role xLSPD i dodaj nowych do bazy", guild_ids=[GUILD_ID])
-    async def cmd_rekrutuj(self, interaction: Interaction):
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.response.send_message("❌ Brak uprawnień.", ephemeral=True)
-            return
-        await interaction.response.defer()
-        results = await auto_recruit(interaction.guild)
-
-        if results["errors"] and not results["added"]:
-            await interaction.followup.send(f"❌ {results['errors'][0]}")
-            return
-
-        embed = nextcord.Embed(title="🆕 Skanowanie xLSPD", color=nextcord.Color.green() if results["added"] else nextcord.Color.blue())
-
-        if results["added"]:
-            embed.add_field(name=f"✅ Dodano ({len(results['added'])})", value="\n".join(f"• {a}" for a in results["added"]), inline=False)
-        else:
-            embed.add_field(name="ℹ️ Nowych rekrutów", value="Brak", inline=False)
-
-        if results.get("skipped"):
-            skipped_preview = results["skipped"][:10]
-            embed.add_field(name=f"⏭️ Już w bazie ({len(results['skipped'])})", value="\n".join(f"• {s}" for s in skipped_preview) + ("\n..." if len(results["skipped"]) > 10 else ""), inline=False)
-
-        if results["errors"]:
-            embed.add_field(name="❌ Błędy", value="\n".join(results["errors"]), inline=False)
-
         await interaction.followup.send(embed=embed)
 
     @slash_command(name="debug", description="Debug — szczegoly dla znalezionego usera", guild_ids=[GUILD_ID])
