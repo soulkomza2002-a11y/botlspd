@@ -140,14 +140,16 @@ async def save_officers(officers: list) -> bool:
 # ─── AUTO-REKRUTACJA (xLSPD → baza) ─────────────────────────────────────────
 async def auto_recruit(guild: nextcord.Guild) -> dict:
     """Wykrywa członków z rolą xLSPD którzy nie są w bazie i dodaje ich jako Cadet."""
-    xlspd_role = nextcord.utils.get(guild.roles, name=XLSPD_ROLE)
+    # Szukaj roli case-insensitive
+    xlspd_role = nextcord.utils.find(lambda r: r.name.lower() == XLSPD_ROLE.lower(), guild.roles)
     if not xlspd_role:
-        return {"added": [], "errors": [f"Brak roli '{XLSPD_ROLE}' na serwerze"]}
+        all_roles = ", ".join(r.name for r in guild.roles)
+        return {"added": [], "errors": [f"Brak roli '{XLSPD_ROLE}' na serwerze. Dostępne role: {all_roles}"]}
 
     officers = await fetch_officers()
     existing_nicks = {(o.get("nick") or "").strip().lower() for o in officers}
 
-    results = {"added": [], "errors": []}
+    results = {"added": [], "errors": [], "skipped": []}
 
     for member in guild.members:
         if member.bot:
@@ -155,16 +157,23 @@ async def auto_recruit(guild: nextcord.Guild) -> dict:
         if xlspd_role not in member.roles:
             continue
         if member.name.lower() in existing_nicks:
+            results["skipped"].append(f"{member.name} (już w bazie)")
             continue
 
-        # Nowy rekrut — dodaj do bazy jako Cadet
-        badge = assign_badge("Cadet", officers)
+        # Nowy rekrut — wykryj stopień z ról Discord
+        detected_rank = "Cadet"
+        for role in member.roles:
+            if role.name in RANK_TO_ROLE:
+                detected_rank = role.name
+                break
+
+        badge = assign_badge(detected_rank, officers)
         new_officer = {
             "id":           int(datetime.utcnow().timestamp() * 1000) + len(officers),
             "badge":        badge,
             "name":         "",
             "nick":         member.name,
-            "rank":         "Cadet",
+            "rank":         detected_rank,
             "dept":         "LSPD",
             "suspended":    False,
             "redEntry":     False,
@@ -238,8 +247,23 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                 else:
                     results["errors"].append(f"Brak roli '{role_name}' na serwerze")
 
+        # ── Odznaka — zmień jeśli nie pasuje do przedziału stopnia ──────
+        current_badge = str(officer.get("badge") or "").strip()
+        badge_changed = False
+        new_badge = current_badge
+        if rank in RANK_BADGE_RANGES:
+            lo, hi = RANK_BADGE_RANGES[rank]
+            badge_num = int(current_badge) if current_badge.isdigit() else -1
+            if badge_num < lo or badge_num > hi:
+                # Odznaka nie pasuje do przedziału — przydziel nową
+                new_badge = assign_badge(rank, officers)
+                if new_badge and new_badge != current_badge:
+                    badge_changed = True
+
         # ── Pseudonim ──────────────────────────────────────────────────────
-        target_nick  = build_nickname(officer)
+        # Użyj nowej odznaki do budowania pseudonimu jeśli się zmieniła
+        display_officer = {**officer, "badge": new_badge} if badge_changed else officer
+        target_nick  = build_nickname(display_officer)
         nick_changed = bool(target_nick) and member.display_name != target_nick
 
         # ── Sprawdź role stopnia ───────────────────────────────────────────
@@ -274,12 +298,21 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         status_to_remove = current_status_roles - target_status_roles
         status_ok        = not status_to_add and not status_to_remove
 
-        if rank_ok and units_ok and status_ok and not nick_changed:
+        if rank_ok and units_ok and status_ok and not nick_changed and not badge_changed:
             results["skipped"].append(member.name)
             continue
 
         changes = []
         try:
+            # Aktualizuj odznakę w bazie jeśli się zmieniła
+            if badge_changed:
+                for o in officers:
+                    if (o.get("nick") or "").strip().lower() == member.name.lower():
+                        o["badge"] = new_badge
+                        break
+                await save_officers(officers)
+                changes.append(f"odznaka→#{new_badge}")
+
             # Aktualizuj stopień
             if not rank_ok:
                 if rank_to_remove:
@@ -440,16 +473,25 @@ class LSPDCog(commands.Cog):
             return
         await interaction.response.defer()
         results = await auto_recruit(interaction.guild)
+
         if results["errors"] and not results["added"]:
             await interaction.followup.send(f"❌ {results['errors'][0]}")
             return
-        if not results["added"]:
-            await interaction.followup.send("✅ Brak nowych rekrutów do dodania.")
-            return
-        desc = "\n".join(f"• {a}" for a in results["added"])
-        embed = nextcord.Embed(title=f"🆕 Dodano {len(results['added'])} rekrutów", description=desc, color=nextcord.Color.green())
+
+        embed = nextcord.Embed(title="🆕 Skanowanie xLSPD", color=nextcord.Color.green() if results["added"] else nextcord.Color.blue())
+
+        if results["added"]:
+            embed.add_field(name=f"✅ Dodano ({len(results['added'])})", value="\n".join(f"• {a}" for a in results["added"]), inline=False)
+        else:
+            embed.add_field(name="ℹ️ Nowych rekrutów", value="Brak", inline=False)
+
+        if results.get("skipped"):
+            skipped_preview = results["skipped"][:10]
+            embed.add_field(name=f"⏭️ Już w bazie ({len(results['skipped'])})", value="\n".join(f"• {s}" for s in skipped_preview) + ("\n..." if len(results["skipped"]) > 10 else ""), inline=False)
+
         if results["errors"]:
             embed.add_field(name="❌ Błędy", value="\n".join(results["errors"]), inline=False)
+
         await interaction.followup.send(embed=embed)
 
     @slash_command(name="debug", description="Debug — szczegoly dla znalezionego usera", guild_ids=[GUILD_ID])
