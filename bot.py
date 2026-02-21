@@ -352,6 +352,19 @@ class LSPDCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    async def _log(self, guild: nextcord.Guild, title: str, description: str, color: int):
+        if not LOG_CHANNEL_ID:
+            return
+        ch = guild.get_channel(LOG_CHANNEL_ID)
+        if not ch:
+            return
+        embed = nextcord.Embed(title=title, description=description, color=color, timestamp=datetime.utcnow())
+        embed.set_footer(text="LSPD Bot")
+        try:
+            await ch.send(embed=embed)
+        except Exception as e:
+            log.error(f"Log channel send error: {e}")
+
     @slash_command(name="sync", description="Ręczna synchronizacja ról i pseudonimów LSPD", guild_ids=[GUILD_ID])
     async def cmd_sync(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_roles:
@@ -371,19 +384,6 @@ class LSPDCog(commands.Cog):
         skip = len(results.get("skipped", []))
         nf = len(results.get("not_found", []))
         await self._log(interaction.guild, "🔄 /sync", f"**Wykonał:** {interaction.user.mention}\n✅ Zaktualizowano: **{upd}** | ⏭️ Bez zmian: **{skip}** | ❓ Nie znaleziono: **{nf}** | ⏱️ {duration:.1f}s", 0x2ecc71)
-
-    async def _log(self, guild: nextcord.Guild, title: str, description: str, color: int):
-        if not LOG_CHANNEL_ID:
-            return
-        ch = guild.get_channel(LOG_CHANNEL_ID)
-        if not ch:
-            return
-        embed = nextcord.Embed(title=title, description=description, color=color, timestamp=datetime.utcnow())
-        embed.set_footer(text="LSPD Bot")
-        try:
-            await ch.send(embed=embed)
-        except Exception as e:
-            log.error(f"Log channel send error: {e}")
 
     @slash_command(name="status", description="Status bota LSPD", guild_ids=[GUILD_ID])
     async def cmd_status(self, interaction: Interaction):
