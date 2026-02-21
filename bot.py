@@ -363,9 +363,27 @@ class LSPDCog(commands.Cog):
         duration = asyncio.get_event_loop().time() - t
         if "error" in results:
             await interaction.followup.send(f"❌ {results['error']}")
+            await self._log(interaction.guild, "🔄 /sync", f"**Wykonał:** {interaction.user.mention}\n❌ Błąd: {results['error']}", 0xe74c3c)
             return
         for embed in build_embeds(results, duration):
             await interaction.followup.send(embed=embed)
+        upd = len(results.get("updated", []))
+        skip = len(results.get("skipped", []))
+        nf = len(results.get("not_found", []))
+        await self._log(interaction.guild, "🔄 /sync", f"**Wykonał:** {interaction.user.mention}\n✅ Zaktualizowano: **{upd}** | ⏭️ Bez zmian: **{skip}** | ❓ Nie znaleziono: **{nf}** | ⏱️ {duration:.1f}s", 0x2ecc71)
+
+    async def _log(self, guild: nextcord.Guild, title: str, description: str, color: int):
+        if not LOG_CHANNEL_ID:
+            return
+        ch = guild.get_channel(LOG_CHANNEL_ID)
+        if not ch:
+            return
+        embed = nextcord.Embed(title=title, description=description, color=color, timestamp=datetime.utcnow())
+        embed.set_footer(text="LSPD Bot")
+        try:
+            await ch.send(embed=embed)
+        except Exception as e:
+            log.error(f"Log channel send error: {e}")
 
     @slash_command(name="status", description="Status bota LSPD", guild_ids=[GUILD_ID])
     async def cmd_status(self, interaction: Interaction):
@@ -376,6 +394,7 @@ class LSPDCog(commands.Cog):
         embed.add_field(name="🔄 Auto-sync",   value=f"Co {SYNC_INTERVAL_MIN} min", inline=True)
         embed.add_field(name="👥 Członków",    value=str(interaction.guild.member_count), inline=True)
         await interaction.followup.send(embed=embed)
+        await self._log(interaction.guild, "📊 /status", f"**Wykonał:** {interaction.user.mention}\nBaza: {'✅ OK' if officers else '❌ Błąd'} ({len(officers)} FP)", 0x3498db)
 
     @slash_command(name="kto", description="Sprawdź stopień osoby w bazie LSPD", guild_ids=[GUILD_ID])
     async def cmd_kto(self, interaction: Interaction, member: nextcord.Member):
@@ -385,6 +404,7 @@ class LSPDCog(commands.Cog):
         found = officer_map_from(officers).get(member.name.lower())
         if not found:
             await interaction.followup.send(f"❓ **{member.name}** nie ma w bazie LSPD.", ephemeral=True)
+            await self._log(interaction.guild, "🔍 /kto", f"**Wykonał:** {interaction.user.mention}\n**Szukał:** {member.mention}\n❓ Nie znaleziono w bazie", 0xe67e22)
             return
         status = "🔴 ZAWIESZONY" if found.get("suspended") else ("🟡 URLOP" if found.get("onLeave") else "🟢 AKTYWNY")
         units  = [u.upper() for u in ["swat","iad","ftd"] if found.get(u)]
@@ -395,6 +415,7 @@ class LSPDCog(commands.Cog):
         if units:
             embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
         await interaction.followup.send(embed=embed)
+        await self._log(interaction.guild, "🔍 /kto", f"**Wykonał:** {interaction.user.mention}\n**Sprawdził:** {member.mention}\n**Wynik:** {found.get('name')} | {found.get('rank','—')} | {status}", 0x3498db)
 
     @slash_command(name="debug", description="Debug — szczegoly dla znalezionego usera", guild_ids=[GUILD_ID])
     async def cmd_debug(self, interaction: Interaction, member: nextcord.Member):
@@ -502,8 +523,10 @@ class LSPDCog(commands.Cog):
                 f"✅ Znaleziono **{len(missing_mentions)}** osób z rolą stopnia bez wpisu w bazie.",
                 ephemeral=True
             )
+            await self._log(interaction.guild, "⚠️ /helper", f"**Wykonał:** {interaction.user.mention}\nZnaleziono **{len(missing_mentions)}** osób z rolą stopnia bez wpisu w bazie.", 0xe67e22)
         else:
             await interaction.followup.send("✅ Wszystkie osoby z rolami stopni są w bazie.", ephemeral=True)
+            await self._log(interaction.guild, "⚠️ /helper", f"**Wykonał:** {interaction.user.mention}\n✅ Wszyscy z rolami stopni są w bazie.", 0x2ecc71)
 
     @slash_command(name="przypomnienie", description="Sprawdź i przypomnij członkom o brakujących danych w bazie LSPD", guild_ids=[GUILD_ID])
     async def cmd_przypomnienie(self, interaction: Interaction):
@@ -547,11 +570,13 @@ class LSPDCog(commands.Cog):
 
         if not no_entry_mentions and not no_name_mentions:
             await interaction.followup.send("✅ Wszyscy członkowie mają kompletne dane w bazie.", ephemeral=True)
+            await self._log(interaction.guild, "🔔 /przypomnienie", f"**Wykonał:** {interaction.user.mention}\n✅ Wszyscy mają kompletne dane.", 0x2ecc71)
         else:
             await interaction.followup.send(
                 f"✅ Wysłano przypomnienia: **{len(no_entry_mentions)}** bez wpisu w bazie, **{len(no_name_mentions)}** bez danych IC.",
                 ephemeral=True
             )
+            await self._log(interaction.guild, "🔔 /przypomnienie", f"**Wykonał:** {interaction.user.mention}\n🎫 Bez wpisu w bazie: **{len(no_entry_mentions)}**\n📝 Bez danych IC: **{len(no_name_mentions)}**", 0xf39c12)
 
 def officer_map_from(officers: list) -> dict:
     return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
