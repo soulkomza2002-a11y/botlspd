@@ -1,6 +1,7 @@
 import os
 import nextcord
 from nextcord.ext import commands, tasks
+from nextcord import slash_command, Interaction
 import aiohttp
 import asyncio
 import logging
@@ -166,59 +167,55 @@ async def auto_sync():
 async def before_auto_sync():
     await bot.wait_until_ready()
 
-# ─── /sync ────────────────────────────────────────────────────────────────────
-@nextcord.slash_command(name="sync", description="Ręczna synchronizacja ról LSPD", guild_ids=[GUILD_ID])
-async def cmd_sync(interaction: nextcord.Interaction):
-    if not interaction.user.guild_permissions.manage_roles:
-        await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
-        return
-    await interaction.response.defer()
-    t = asyncio.get_event_loop().time()
-    results = await sync_roles(interaction.guild)
-    duration = asyncio.get_event_loop().time() - t
-    if "error" in results:
-        await interaction.followup.send(f"❌ {results['error']}")
-        return
-    for embed in build_embeds(results, duration):
+# ─── COG Z KOMENDAMI ──────────────────────────────────────────────────────────
+class LSPDCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @slash_command(name="sync", description="Ręczna synchronizacja ról LSPD", guild_ids=[GUILD_ID])
+    async def cmd_sync(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        t = asyncio.get_event_loop().time()
+        results = await sync_roles(interaction.guild)
+        duration = asyncio.get_event_loop().time() - t
+        if "error" in results:
+            await interaction.followup.send(f"❌ {results['error']}")
+            return
+        for embed in build_embeds(results, duration):
+            await interaction.followup.send(embed=embed)
+
+    @slash_command(name="status", description="Status bota LSPD", guild_ids=[GUILD_ID])
+    async def cmd_status(self, interaction: Interaction):
+        await interaction.response.defer()
+        officers = await fetch_officers()
+        embed = nextcord.Embed(title="🤖 LSPD Bot — Status", color=nextcord.Color.blue())
+        embed.add_field(name="📡 Baza danych", value=f"{'✅ OK' if officers else '❌ Błąd'} ({len(officers)} FP)", inline=False)
+        embed.add_field(name="🔄 Auto-sync",   value=f"Co {SYNC_INTERVAL_MIN} min", inline=True)
+        embed.add_field(name="👥 Członków",    value=str(interaction.guild.member_count), inline=True)
         await interaction.followup.send(embed=embed)
 
-bot.add_application_command(cmd_sync)
-
-# ─── /status ──────────────────────────────────────────────────────────────────
-@nextcord.slash_command(name="status", description="Status bota LSPD", guild_ids=[GUILD_ID])
-async def cmd_status(interaction: nextcord.Interaction):
-    await interaction.response.defer()
-    officers = await fetch_officers()
-    embed = nextcord.Embed(title="🤖 LSPD Bot — Status", color=nextcord.Color.blue())
-    embed.add_field(name="📡 Baza danych", value=f"{'✅ OK' if officers else '❌ Błąd'} ({len(officers)} FP)", inline=False)
-    embed.add_field(name="🔄 Auto-sync",   value=f"Co {SYNC_INTERVAL_MIN} min", inline=True)
-    embed.add_field(name="👥 Członków",    value=str(interaction.guild.member_count), inline=True)
-    await interaction.followup.send(embed=embed)
-
-bot.add_application_command(cmd_status)
-
-# ─── /kto ─────────────────────────────────────────────────────────────────────
-@nextcord.slash_command(name="kto", description="Sprawdź stopień osoby w bazie LSPD", guild_ids=[GUILD_ID])
-async def cmd_kto(interaction: nextcord.Interaction, member: nextcord.Member):
-    await interaction.response.defer()
-    officers = await fetch_officers()
-    disp  = member.display_name.lower()
-    uname = member.name.lower()
-    found = next((o for o in officers if (o.get("nick") or "").strip().lower() in (disp, uname)), None)
-    if not found:
-        await interaction.followup.send(f"❓ **{member.display_name}** nie ma w bazie LSPD.", ephemeral=True)
-        return
-    status = "🔴 ZAWIESZONY" if found.get("suspended") else ("🟡 URLOP" if found.get("onLeave") else "🟢 AKTYWNY")
-    units  = [u.upper() for u in ["swat","iad","ftd"] if found.get(u)]
-    embed = nextcord.Embed(title=f"👮 {found.get('name')}", color=nextcord.Color.blue())
-    embed.add_field(name="Stopień",  value=found.get("rank","—"),      inline=True)
-    embed.add_field(name="Odznaka", value=f"#{found.get('badge','—')}", inline=True)
-    embed.add_field(name="Status",  value=status,                       inline=True)
-    if units:
-        embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
-    await interaction.followup.send(embed=embed)
-
-bot.add_application_command(cmd_kto)
+    @slash_command(name="kto", description="Sprawdź stopień osoby w bazie LSPD", guild_ids=[GUILD_ID])
+    async def cmd_kto(self, interaction: Interaction, member: nextcord.Member):
+        await interaction.response.defer()
+        officers = await fetch_officers()
+        disp  = member.display_name.lower()
+        uname = member.name.lower()
+        found = next((o for o in officers if (o.get("nick") or "").strip().lower() in (disp, uname)), None)
+        if not found:
+            await interaction.followup.send(f"❓ **{member.display_name}** nie ma w bazie LSPD.", ephemeral=True)
+            return
+        status = "🔴 ZAWIESZONY" if found.get("suspended") else ("🟡 URLOP" if found.get("onLeave") else "🟢 AKTYWNY")
+        units  = [u.upper() for u in ["swat","iad","ftd"] if found.get(u)]
+        embed = nextcord.Embed(title=f"👮 {found.get('name')}", color=nextcord.Color.blue())
+        embed.add_field(name="Stopień",  value=found.get("rank","—"),      inline=True)
+        embed.add_field(name="Odznaka", value=f"#{found.get('badge','—')}", inline=True)
+        embed.add_field(name="Status",  value=status,                       inline=True)
+        if units:
+            embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
+        await interaction.followup.send(embed=embed)
 
 # ─── ON READY ─────────────────────────────────────────────────────────────────
 @bot.event
@@ -234,4 +231,5 @@ if __name__ == "__main__":
         if not val:
             log.error(f"Brak zmiennej środowiskowej: {var}")
             exit(1)
+    bot.add_cog(LSPDCog(bot))
     bot.run(DISCORD_TOKEN)
