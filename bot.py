@@ -160,20 +160,13 @@ async def auto_recruit(guild: nextcord.Guild) -> dict:
             results["skipped"].append(f"{member.name} (już w bazie)")
             continue
 
-        # Nowy rekrut — wykryj stopień z ról Discord
-        detected_rank = "Cadet"
-        for role in member.roles:
-            if role.name in RANK_TO_ROLE:
-                detected_rank = role.name
-                break
-
-        badge = assign_badge(detected_rank, officers)
+        # Nowy rekrut — tylko nick, resztę wypełni admin ręcznie
         new_officer = {
             "id":           int(datetime.utcnow().timestamp() * 1000) + len(officers),
-            "badge":        badge,
+            "badge":        "",
             "name":         "",
             "nick":         member.name,
-            "rank":         detected_rank,
+            "rank":         "",
             "dept":         "LSPD",
             "suspended":    False,
             "redEntry":     False,
