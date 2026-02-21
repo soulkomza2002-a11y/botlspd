@@ -246,11 +246,8 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         try:
             # Aktualizuj odznakę w bazie jeśli się zmieniła
             if badge_changed:
-                for o in officers:
-                    if (o.get("nick") or "").strip().lower() == member.name.lower():
-                        o["badge"] = new_badge
-                        break
-                await save_officers(officers)
+                # Zaktualizuj w liście officers od razu (żeby kolejne assign_badge w tej samej pętli widziały zajętą odznakę)
+                officer["badge"] = new_badge
                 changes.append(f"odznaka→#{new_badge}")
 
             # Aktualizuj stopień
@@ -296,6 +293,10 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
             results["errors"].append(f"Brak uprawnień: {member.name}")
         except Exception as e:
             results["errors"].append(f"{member.name}: {e}")
+
+    # Zapisz odznaki do JSONBin jeśli cokolwiek się zmieniło
+    if any("odznaka" in u for u in results.get("updated", [])):
+        await save_officers(officers)
 
     return results
 
