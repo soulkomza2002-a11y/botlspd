@@ -31,6 +31,7 @@ RANK_TO_ROLE = {
     "Officer III":      "Officer III",
     "Officer II":       "Officer II",
     "Officer I":        "Officer I",
+    "Cadet":             "Cadet",
 }
 ALL_LSPD_ROLES = set(RANK_TO_ROLE.values())
 
@@ -108,15 +109,10 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
             continue
 
         rank = officer.get("rank", "")
-        if rank not in RANK_TO_ROLE:
-            results["not_found"].append(member.name)
-            continue
-
-        target_role_name = RANK_TO_ROLE[rank]
-        target_role = guild_roles.get(target_role_name)
-        if not target_role:
+        target_role_name = RANK_TO_ROLE.get(rank)
+        target_role = guild_roles.get(target_role_name) if target_role_name else None
+        if target_role_name and not target_role:
             results["errors"].append(f"Brak roli '{target_role_name}' na serwerze")
-            continue
 
         # ── Jednostki (SWAT/IAD/FTD) ──────────────────────────────────────
         target_unit_roles = set()
@@ -134,7 +130,7 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
 
         # ── Sprawdź role stopnia ───────────────────────────────────────────
         current_lspd   = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
-        has_target     = any(r.name == target_role_name for r in member.roles)
+        has_target     = any(r.name == target_role_name for r in member.roles) if target_role_name else True
         rank_to_remove = [r for r in current_lspd if r.name != target_role_name]
         rank_ok        = has_target and len(rank_to_remove) == 0
 
