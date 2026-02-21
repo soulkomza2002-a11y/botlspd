@@ -84,7 +84,7 @@ def assign_badge(rank: str, officers: list) -> str:
         return ""
     lo, hi = rng
     used = {int(o["badge"]) for o in officers if str(o.get("badge", "")).isdigit()}
-    for b in range(hi, lo - 1, -1):
+    for b in range(lo, hi + 1):
         if b not in used:
             return str(b)
     return ""
