@@ -86,6 +86,7 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
     if not officers:
         return {"error": "Nie udało się pobrać danych z bazy"}
 
+    # Mapa: nick OOC (nazwa konta Discord) → dane oficera
     officer_map = {}
     for o in officers:
         nick = (o.get("nick") or "").strip().lower()
@@ -99,17 +100,16 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         if member.bot:
             continue
 
-        display_lower  = member.display_name.lower()
-        username_lower = member.name.lower()
-        officer = officer_map.get(display_lower) or officer_map.get(username_lower)
+        # Dopasowanie WYŁĄCZNIE po nazwie konta Discord (member.name)
+        officer = officer_map.get(member.name.lower())
 
         if not officer:
-            results["not_found"].append(member.display_name)
+            results["not_found"].append(member.name)
             continue
 
         rank = officer.get("rank", "")
         if rank not in RANK_TO_ROLE:
-            results["not_found"].append(member.display_name)
+            results["not_found"].append(member.name)
             continue
 
         target_role_name = RANK_TO_ROLE[rank]
@@ -130,24 +130,22 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
 
         # ── Pseudonim ──────────────────────────────────────────────────────
         target_nick  = build_nickname(officer)
-        current_nick = member.display_name
-        nick_changed = bool(target_nick) and current_nick != target_nick
+        nick_changed = bool(target_nick) and member.display_name != target_nick
 
         # ── Sprawdź role stopnia ───────────────────────────────────────────
-        current_lspd = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
-        has_target   = any(r.name == target_role_name for r in member.roles)
-        # Usuń stare role stopnia (wszystkie poza target)
+        current_lspd   = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
+        has_target     = any(r.name == target_role_name for r in member.roles)
         rank_to_remove = [r for r in current_lspd if r.name != target_role_name]
-        rank_ok = has_target and len(rank_to_remove) == 0
+        rank_ok        = has_target and len(rank_to_remove) == 0
 
         # ── Sprawdź role jednostek ─────────────────────────────────────────
         current_unit_roles = {r for r in member.roles if r.name in ALL_UNIT_ROLES}
         units_to_add    = target_unit_roles - current_unit_roles
         units_to_remove = current_unit_roles - target_unit_roles
-        units_ok = not units_to_add and not units_to_remove
+        units_ok        = not units_to_add and not units_to_remove
 
         if rank_ok and units_ok and not nick_changed:
-            results["skipped"].append(member.display_name)
+            results["skipped"].append(member.name)
             continue
 
         changes = []
@@ -166,26 +164,24 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                     await member.remove_roles(*units_to_remove, reason="LSPD Bot sync")
                 if units_to_add:
                     await member.add_roles(*units_to_add, reason="LSPD Bot sync")
-                added   = [r.name for r in units_to_add]
-                removed = [r.name for r in units_to_remove]
-                if added:
-                    changes.append(f"+jednostki:{','.join(added)}")
-                if removed:
-                    changes.append(f"-jednostki:{','.join(removed)}")
+                if units_to_add:
+                    changes.append(f"+{','.join(r.name for r in units_to_add)}")
+                if units_to_remove:
+                    changes.append(f"-{','.join(r.name for r in units_to_remove)}")
 
             # Aktualizuj pseudonim
             if nick_changed:
                 await member.edit(nick=target_nick, reason="LSPD Bot sync")
                 changes.append(f"nick→{target_nick}")
 
-            summary = f"{current_nick} ({', '.join(changes)})"
+            summary = f"{member.name} ({', '.join(changes)})"
             results["updated"].append(summary)
             log.info(f"[SYNC] {summary}")
 
         except nextcord.Forbidden:
-            results["errors"].append(f"Brak uprawnień: {member.display_name}")
+            results["errors"].append(f"Brak uprawnień: {member.name}")
         except Exception as e:
-            results["errors"].append(f"{member.display_name}: {e}")
+            results["errors"].append(f"{member.name}: {e}")
 
     return results
 
@@ -269,11 +265,10 @@ class LSPDCog(commands.Cog):
     async def cmd_kto(self, interaction: Interaction, member: nextcord.Member):
         await interaction.response.defer()
         officers = await fetch_officers()
-        disp  = member.display_name.lower()
-        uname = member.name.lower()
-        found = next((o for o in officers if (o.get("nick") or "").strip().lower() in (disp, uname)), None)
+        # /kto też szuka po nazwie konta
+        found = officer_map_from(officers).get(member.name.lower())
         if not found:
-            await interaction.followup.send(f"❓ **{member.display_name}** nie ma w bazie LSPD.", ephemeral=True)
+            await interaction.followup.send(f"❓ **{member.name}** nie ma w bazie LSPD.", ephemeral=True)
             return
         status = "🔴 ZAWIESZONY" if found.get("suspended") else ("🟡 URLOP" if found.get("onLeave") else "🟢 AKTYWNY")
         units  = [u.upper() for u in ["swat","iad","ftd"] if found.get(u)]
@@ -284,6 +279,9 @@ class LSPDCog(commands.Cog):
         if units:
             embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
         await interaction.followup.send(embed=embed)
+
+def officer_map_from(officers: list) -> dict:
+    return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
 
 # ─── ON READY ─────────────────────────────────────────────────────────────────
 @bot.event
