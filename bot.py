@@ -463,6 +463,67 @@ class LSPDCog(commands.Cog):
 
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
+    @slash_command(name="przypomnienie", description="Sprawdź i przypomnij członkom o brakujących danych w bazie LSPD", guild_ids=[GUILD_ID])
+    async def cmd_przypomnienie(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
+            return
+        await interaction.response.defer()
+
+        officers = await fetch_officers()
+        if not officers:
+            await interaction.followup.send("❌ Nie udało się pobrać danych z bazy.")
+            return
+
+        omap = officer_map_from(officers)
+        guild = interaction.guild
+
+        pinged_no_entry = []
+        pinged_no_name  = []
+        errors          = []
+
+        for member in guild.members:
+            if member.bot:
+                continue
+
+            officer = omap.get(member.name.lower())
+
+            if officer is None:
+                # Osoby nie ma w bazie — ping z tytułem ticketu o stopień
+                try:
+                    await interaction.channel.send(
+                        f"{member.mention}\n**🎫 Stwórz ticket z raportem o stopień**"
+                    )
+                    pinged_no_entry.append(member.name)
+                except Exception as e:
+                    errors.append(f"{member.name}: {e}")
+            else:
+                # Osoba jest w bazie, ale pole imię i nazwisko jest puste
+                name_field = (officer.get("name") or "").strip()
+                if not name_field:
+                    try:
+                        await interaction.channel.send(
+                            f"{member.mention}\n**📝 Ustaw dane IC jako pseudonim!**"
+                        )
+                        pinged_no_name.append(member.name)
+                    except Exception as e:
+                        errors.append(f"{member.name}: {e}")
+
+        embed = nextcord.Embed(
+            title="🔔 Wyniki komendy /przypomnienie",
+            color=nextcord.Color.orange(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="🎫 Brak w bazie (ticket o stopień)", value=str(len(pinged_no_entry)), inline=True)
+        embed.add_field(name="📝 Brak imienia i nazwiska (IC)",    value=str(len(pinged_no_name)),  inline=True)
+        if errors:
+            embed.add_field(
+                name="❌ Błędy",
+                value="\n".join(errors[:5]) + ("..." if len(errors) > 5 else ""),
+                inline=False
+            )
+        await interaction.followup.send(embed=embed)
+
 def officer_map_from(officers: list) -> dict:
     return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
 
