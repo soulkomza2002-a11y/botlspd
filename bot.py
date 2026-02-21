@@ -76,15 +76,16 @@ RANK_BADGE_RANGES = {
 }
 
 def assign_badge(rank: str, officers: list) -> str:
-    """Zwraca najwyższą wolną odznakę w przedziale dla danego stopnia."""
+    """Zwraca najniższą wolną odznakę w przedziale dla danego stopnia, z wiodącymi zerami."""
     rng = RANK_BADGE_RANGES.get(rank)
     if not rng:
         return ""
     lo, hi = rng
     used = {int(o["badge"]) for o in officers if str(o.get("badge", "")).isdigit()}
+    digits = len(str(hi))  # liczba cyfr wyznaczona przez maksimum przedziału
     for b in range(lo, hi + 1):
         if b not in used:
-            return str(b)
+            return str(b).zfill(digits)
     return ""
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
