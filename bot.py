@@ -162,7 +162,7 @@ async def auto_recruit(guild: nextcord.Guild) -> dict:
 
         # Nowy rekrut — tylko nick, resztę wypełni admin ręcznie
         new_officer = {
-            "id":           int(datetime.utcnow().timestamp() * 1000) + len(officers),
+            "id":           int(datetime.now().timestamp() * 1000) + len(officers),
             "badge":        "",
             "name":         "",
             "nick":         member.name,
@@ -179,8 +179,8 @@ async def auto_recruit(guild: nextcord.Guild) -> dict:
         }
         officers.append(new_officer)
         existing_nicks.add(member.name.lower())
-        results["added"].append(f"{member.name} (odznaka #{badge})")
-        log.info(f"[REKRUT] Dodano {member.name} jako Cadet, odznaka #{badge}")
+        results["added"].append(member.name)
+        log.info(f"[REKRUT] Dodano {member.name} do bazy")
 
     if results["added"]:
         ok = await save_officers(officers)
