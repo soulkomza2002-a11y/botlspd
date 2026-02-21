@@ -34,6 +34,14 @@ RANK_TO_ROLE = {
 }
 ALL_LSPD_ROLES = set(RANK_TO_ROLE.values())
 
+# ─── MAPOWANIE JEDNOSTKI → ROLA ───────────────────────────────────────────────
+UNIT_TO_ROLE = {
+    "swat": "SWAT",
+    "iad":  "IAD",
+    "ftd":  "FTD",
+}
+ALL_UNIT_ROLES = set(UNIT_TO_ROLE.values())
+
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -66,7 +74,6 @@ async def fetch_officers() -> list:
 
 # ─── BUDOWANIE PSEUDONIMU ─────────────────────────────────────────────────────
 def build_nickname(officer: dict) -> str:
-    """Buduje pseudonim w formacie [odznaka] Imię Nazwisko"""
     badge = (officer.get("badge") or "").strip()
     name  = (officer.get("name")  or "").strip()
     if badge and name:
@@ -79,7 +86,6 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
     if not officers:
         return {"error": "Nie udało się pobrać danych z bazy"}
 
-    # nick OOC (Discord) → dane oficera
     officer_map = {}
     for o in officers:
         nick = (o.get("nick") or "").strip().lower()
@@ -108,35 +114,64 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
 
         target_role_name = RANK_TO_ROLE[rank]
         target_role = guild_roles.get(target_role_name)
-
         if not target_role:
             results["errors"].append(f"Brak roli '{target_role_name}' na serwerze")
             continue
+
+        # ── Jednostki (SWAT/IAD/FTD) ──────────────────────────────────────
+        target_unit_roles = set()
+        for field, role_name in UNIT_TO_ROLE.items():
+            if officer.get(field):
+                r = guild_roles.get(role_name)
+                if r:
+                    target_unit_roles.add(r)
+                else:
+                    results["errors"].append(f"Brak roli '{role_name}' na serwerze")
 
         # ── Pseudonim ──────────────────────────────────────────────────────
         target_nick  = build_nickname(officer)
         current_nick = member.display_name
         nick_changed = bool(target_nick) and current_nick != target_nick
 
-        # ── Role ───────────────────────────────────────────────────────────
+        # ── Sprawdź role stopnia ───────────────────────────────────────────
         current_lspd = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
         has_target   = any(r.name == target_role_name for r in member.roles)
-        role_ok      = has_target and len(current_lspd) == 1
+        # Usuń stare role stopnia (wszystkie poza target)
+        rank_to_remove = [r for r in current_lspd if r.name != target_role_name]
+        rank_ok = has_target and len(rank_to_remove) == 0
 
-        if role_ok and not nick_changed:
+        # ── Sprawdź role jednostek ─────────────────────────────────────────
+        current_unit_roles = {r for r in member.roles if r.name in ALL_UNIT_ROLES}
+        units_to_add    = target_unit_roles - current_unit_roles
+        units_to_remove = current_unit_roles - target_unit_roles
+        units_ok = not units_to_add and not units_to_remove
+
+        if rank_ok and units_ok and not nick_changed:
             results["skipped"].append(member.display_name)
             continue
 
         changes = []
         try:
-            # Aktualizuj role
-            if not role_ok:
-                to_remove = [r for r in member.roles if r.name in ALL_LSPD_ROLES and r.name != target_role_name]
-                if to_remove:
-                    await member.remove_roles(*to_remove, reason="LSPD Bot sync")
+            # Aktualizuj stopień
+            if not rank_ok:
+                if rank_to_remove:
+                    await member.remove_roles(*rank_to_remove, reason="LSPD Bot sync")
                 if not has_target:
                     await member.add_roles(target_role, reason="LSPD Bot sync")
-                changes.append(f"rola→{target_role_name}")
+                changes.append(f"stopień→{target_role_name}")
+
+            # Aktualizuj jednostki
+            if not units_ok:
+                if units_to_remove:
+                    await member.remove_roles(*units_to_remove, reason="LSPD Bot sync")
+                if units_to_add:
+                    await member.add_roles(*units_to_add, reason="LSPD Bot sync")
+                added   = [r.name for r in units_to_add]
+                removed = [r.name for r in units_to_remove]
+                if added:
+                    changes.append(f"+jednostki:{','.join(added)}")
+                if removed:
+                    changes.append(f"-jednostki:{','.join(removed)}")
 
             # Aktualizuj pseudonim
             if nick_changed:
