@@ -31,6 +31,7 @@ RANK_TO_ROLE = {
     "Officer III":      "Officer III",
     "Officer II":       "Officer II",
     "Officer I":        "Officer I",
+    "Cadet":            "Cadet",
 }
 ALL_LSPD_ROLES = set(RANK_TO_ROLE.values())
 
