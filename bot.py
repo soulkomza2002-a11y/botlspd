@@ -31,7 +31,6 @@ RANK_TO_ROLE = {
     "Officer III":      "Officer III",
     "Officer II":       "Officer II",
     "Officer I":        "Officer I",
-    "Cadet":            "Cadet",
 }
 ALL_LSPD_ROLES = set(RANK_TO_ROLE.values())
 
@@ -65,18 +64,27 @@ async def fetch_officers() -> list:
         log.error(f"JSONBin error: {e}")
         return []
 
+# ─── BUDOWANIE PSEUDONIMU ─────────────────────────────────────────────────────
+def build_nickname(officer: dict) -> str:
+    """Buduje pseudonim w formacie [odznaka] Imię Nazwisko"""
+    badge = (officer.get("badge") or "").strip()
+    name  = (officer.get("name")  or "").strip()
+    if badge and name:
+        return f"[{badge}] {name}"
+    return name or ""
+
 # ─── SYNC LOGIC ───────────────────────────────────────────────────────────────
 async def sync_roles(guild: nextcord.Guild) -> dict:
     officers = await fetch_officers()
     if not officers:
         return {"error": "Nie udało się pobrać danych z bazy"}
 
-    nick_map = {}
+    # nick OOC (Discord) → dane oficera
+    officer_map = {}
     for o in officers:
         nick = (o.get("nick") or "").strip().lower()
-        rank = o.get("rank", "")
-        if nick and rank in RANK_TO_ROLE:
-            nick_map[nick] = rank
+        if nick:
+            officer_map[nick] = o
 
     results = {"updated": [], "skipped": [], "not_found": [], "errors": []}
     guild_roles = {r.name: r for r in guild.roles}
@@ -87,34 +95,58 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
 
         display_lower  = member.display_name.lower()
         username_lower = member.name.lower()
-        matched_rank   = nick_map.get(display_lower) or nick_map.get(username_lower)
+        officer = officer_map.get(display_lower) or officer_map.get(username_lower)
 
-        if not matched_rank:
+        if not officer:
             results["not_found"].append(member.display_name)
             continue
 
-        target_role_name = RANK_TO_ROLE[matched_rank]
+        rank = officer.get("rank", "")
+        if rank not in RANK_TO_ROLE:
+            results["not_found"].append(member.display_name)
+            continue
+
+        target_role_name = RANK_TO_ROLE[rank]
         target_role = guild_roles.get(target_role_name)
 
         if not target_role:
             results["errors"].append(f"Brak roli '{target_role_name}' na serwerze")
             continue
 
+        # ── Pseudonim ──────────────────────────────────────────────────────
+        target_nick  = build_nickname(officer)
+        current_nick = member.display_name
+        nick_changed = bool(target_nick) and current_nick != target_nick
+
+        # ── Role ───────────────────────────────────────────────────────────
         current_lspd = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
         has_target   = any(r.name == target_role_name for r in member.roles)
+        role_ok      = has_target and len(current_lspd) == 1
 
-        if has_target and len(current_lspd) == 1:
+        if role_ok and not nick_changed:
             results["skipped"].append(member.display_name)
             continue
 
+        changes = []
         try:
-            to_remove = [r for r in member.roles if r.name in ALL_LSPD_ROLES and r.name != target_role_name]
-            if to_remove:
-                await member.remove_roles(*to_remove, reason="LSPD Bot sync")
-            if not has_target:
-                await member.add_roles(target_role, reason="LSPD Bot sync")
-            results["updated"].append(f"{member.display_name} → {target_role_name}")
-            log.info(f"[SYNC] {member.display_name} → {target_role_name}")
+            # Aktualizuj role
+            if not role_ok:
+                to_remove = [r for r in member.roles if r.name in ALL_LSPD_ROLES and r.name != target_role_name]
+                if to_remove:
+                    await member.remove_roles(*to_remove, reason="LSPD Bot sync")
+                if not has_target:
+                    await member.add_roles(target_role, reason="LSPD Bot sync")
+                changes.append(f"rola→{target_role_name}")
+
+            # Aktualizuj pseudonim
+            if nick_changed:
+                await member.edit(nick=target_nick, reason="LSPD Bot sync")
+                changes.append(f"nick→{target_nick}")
+
+            summary = f"{current_nick} ({', '.join(changes)})"
+            results["updated"].append(summary)
+            log.info(f"[SYNC] {summary}")
+
         except nextcord.Forbidden:
             results["errors"].append(f"Brak uprawnień: {member.display_name}")
         except Exception as e:
@@ -173,7 +205,7 @@ class LSPDCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @slash_command(name="sync", description="Ręczna synchronizacja ról LSPD", guild_ids=[GUILD_ID])
+    @slash_command(name="sync", description="Ręczna synchronizacja ról i pseudonimów LSPD", guild_ids=[GUILD_ID])
     async def cmd_sync(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
