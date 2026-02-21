@@ -280,6 +280,31 @@ class LSPDCog(commands.Cog):
             embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
         await interaction.followup.send(embed=embed)
 
+    @slash_command(name="debug", description="Debug porownaj baze z czlonkami serwera", guild_ids=[GUILD_ID])
+    async def cmd_debug(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("Brak uprawnien.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        officers = await fetch_officers()
+        omap = officer_map_from(officers)
+
+        lines = ["**Nicki w bazie (pole nick):**"]
+        for nick in sorted(omap.keys())[:30]:
+            o = omap[nick]
+            lines.append(f"`{nick}` -> {o.get('name')} [{o.get('rank')}]")
+
+        lines.append("\n**Nazwy kont na serwerze (member.name):**")
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+            match = "OK" if member.name.lower() in omap else "NIE"
+            lines.append(f"{match} `{member.name}` (pseudonim: {member.display_name})")
+
+        msg = "\n".join(lines)
+        for i in range(0, len(msg), 1900):
+            await interaction.followup.send(msg[i:i+1900], ephemeral=True)
+
 def officer_map_from(officers: list) -> dict:
     return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
 
