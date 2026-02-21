@@ -280,30 +280,72 @@ class LSPDCog(commands.Cog):
             embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
         await interaction.followup.send(embed=embed)
 
-    @slash_command(name="debug", description="Debug porownaj baze z czlonkami serwera", guild_ids=[GUILD_ID])
-    async def cmd_debug(self, interaction: Interaction):
+    @slash_command(name="debug", description="Debug — szczegoly dla znalezionego usera", guild_ids=[GUILD_ID])
+    async def cmd_debug(self, interaction: Interaction, member: nextcord.Member):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("Brak uprawnien.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
+
         officers = await fetch_officers()
         omap = officer_map_from(officers)
+        officer = omap.get(member.name.lower())
 
-        lines = ["**Nicki w bazie (pole nick):**"]
-        for nick in sorted(omap.keys())[:30]:
-            o = omap[nick]
-            lines.append(f"`{nick}` -> {o.get('name')} [{o.get('rank')}]")
+        if not officer:
+            await interaction.followup.send(f"NIE ZNALEZIONO `{member.name}` w bazie.\nNicki w bazie: {', '.join(sorted(omap.keys()))}", ephemeral=True)
+            return
 
-        lines.append("\n**Nazwy kont na serwerze (member.name):**")
-        for member in interaction.guild.members:
-            if member.bot:
-                continue
-            match = "OK" if member.name.lower() in omap else "NIE"
-            lines.append(f"{match} `{member.name}` (pseudonim: {member.display_name})")
+        guild_roles = {r.name: r for r in interaction.guild.roles}
 
-        msg = "\n".join(lines)
-        for i in range(0, len(msg), 1900):
-            await interaction.followup.send(msg[i:i+1900], ephemeral=True)
+        rank = officer.get("rank", "")
+        target_role_name = RANK_TO_ROLE.get(rank, "BRAK W MAPOWANIU")
+        target_nick = build_nickname(officer)
+
+        current_lspd = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
+        has_target = any(r.name == target_role_name for r in member.roles)
+        rank_to_remove = [r for r in current_lspd if r.name != target_role_name]
+        rank_ok = has_target and len(rank_to_remove) == 0
+
+        current_unit_roles = {r for r in member.roles if r.name in ALL_UNIT_ROLES}
+        target_unit_roles = set()
+        for field, role_name in UNIT_TO_ROLE.items():
+            if officer.get(field):
+                r = guild_roles.get(role_name)
+                if r:
+                    target_unit_roles.add(r)
+        units_to_add = target_unit_roles - current_unit_roles
+        units_to_remove = current_unit_roles - target_unit_roles
+        units_ok = not units_to_add and not units_to_remove
+
+        nick_changed = bool(target_nick) and member.display_name != target_nick
+
+        lines = [
+            f"**Debug dla `{member.name}`**",
+            f"",
+            f"**Baza:**",
+            f"  nick: `{officer.get('nick')}`",
+            f"  name: `{officer.get('name')}`",
+            f"  badge: `{officer.get('badge')}`",
+            f"  rank: `{rank}`",
+            f"  swat: `{officer.get('swat')}` | iad: `{officer.get('iad')}` | ftd: `{officer.get('ftd')}`",
+            f"",
+            f"**Discord:**",
+            f"  member.name: `{member.name}`",
+            f"  display_name: `{member.display_name}`",
+            f"  role stopnia: `{[r.name for r in current_lspd]}`",
+            f"  role jednostek: `{[r.name for r in current_unit_roles]}`",
+            f"",
+            f"**Co chce zrobic:**",
+            f"  target_role: `{target_role_name}` | rank_ok: `{rank_ok}`",
+            f"  target_nick: `{target_nick}` | nick_changed: `{nick_changed}`",
+            f"  units_to_add: `{[r.name for r in units_to_add]}`",
+            f"  units_to_remove: `{[r.name for r in units_to_remove]}`",
+            f"  units_ok: `{units_ok}`",
+            f"",
+            f"**Wynik:** {'SKIPPED (nic do zmiany)' if rank_ok and units_ok and not nick_changed else 'POWINIEN ZMIENIC'}",
+        ]
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 def officer_map_from(officers: list) -> dict:
     return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
