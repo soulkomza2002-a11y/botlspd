@@ -1,0 +1,23 @@
+# ================================================================
+# WAŻNE — te pliki nigdy nie trafią na GitHub
+# ================================================================
+
+# Plik z sekretami — NIGDY nie wgrywaj!
+.env
+
+# Cache Pythona
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Środowisko wirtualne
+venv/
+.venv/
+env/
+
+# Logi
+*.log
+
+# System
+.DS_Store
+Thumbs.db

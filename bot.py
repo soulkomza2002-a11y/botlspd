@@ -8,10 +8,10 @@ import logging
 from datetime import datetime
 
 # ─── KONFIGURACJA ─────────────────────────────────────────────────────────────
-DISCORD_TOKEN     = os.getenv("MTQ3NDgzNjYxNDAzODU1MjczNw.GXDJbg.0B-Pejs-nph7PKC69GTFO7_SoTX5QCsXmGRPFw")
-GUILD_ID          = int(os.getenv("1367506926056767529", "0"))
-JSONBIN_BIN_ID    = os.getenv("JSONBIN_BIN_ID",  "6998859343b1c97be98eb84c")
-JSONBIN_API_KEY   = os.getenv("JSONBIN_API_KEY",  "$2a$10$3L8S1mGNReuQXCj1pvYGaeUH0o1HosE59kmJC6exDhU.1aVPMY0fy")
+DISCORD_TOKEN     = os.getenv("DISCORD_TOKEN")
+GUILD_ID          = int(os.getenv("GUILD_ID", "0"))
+JSONBIN_BIN_ID    = os.getenv("JSONBIN_BIN_ID")
+JSONBIN_API_KEY   = os.getenv("JSONBIN_API_KEY")
 SYNC_INTERVAL_MIN = int(os.getenv("SYNC_INTERVAL", "5"))
 LOG_CHANNEL_ID    = int(os.getenv("LOG_CHANNEL_ID", "0"))  # opcjonalnie
 
@@ -32,7 +32,6 @@ RANK_TO_ROLE = {
     "Officer III":      "Officer III",
     "Officer II":       "Officer II",
     "Officer I":        "Officer I",
-    "Cadet":            "Cadet",
 }
 
 # Wszystkie możliwe role LSPD (bot będzie nimi zarządzał)
