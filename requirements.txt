@@ -1,2 +1,2 @@
-py-cord==2.6.1
+nextcord==2.6.1
 aiohttp==3.9.1
