@@ -13,7 +13,7 @@ GUILD_ID          = int(os.getenv("GUILD_ID", "0"))
 JSONBIN_BIN_ID    = os.getenv("JSONBIN_BIN_ID")
 JSONBIN_API_KEY   = os.getenv("JSONBIN_API_KEY")
 SYNC_INTERVAL_MIN = int(os.getenv("SYNC_INTERVAL", "5"))
-LOG_CHANNEL_ID    = int(os.getenv("LOG_CHANNEL_ID", "0"))
+LOG_CHANNEL_ID    = 1474443852784992418
 
 # ─── MAPOWANIE STOPIEŃ → ROLA ─────────────────────────────────────────────────
 RANK_TO_ROLE = {
@@ -238,7 +238,13 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         status_to_remove = current_status_roles - target_status_roles
         status_ok        = not status_to_add and not status_to_remove
 
-        if rank_ok and units_ok and status_ok and not nick_changed and not badge_changed:
+        # ── Command Bureau ─────────────────────────────────────────────────
+        has_cb = any(r.name == "Command Bureau" for r in member.roles)
+        cb_changed = bool(officer.get("commandBureau")) != has_cb
+        if cb_changed:
+            officer["commandBureau"] = has_cb
+
+        if rank_ok and units_ok and status_ok and not nick_changed and not badge_changed and not cb_changed:
             results["skipped"].append(member.name)
             continue
 
@@ -285,6 +291,9 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                 await member.edit(nick=target_nick, reason="LSPD Bot sync")
                 changes.append(f"nick→{target_nick}")
 
+            if cb_changed:
+                changes.append(f"commandBureau→{has_cb}")
+
             summary = f"{member.name} ({', '.join(changes)})"
             results["updated"].append(summary)
             log.info(f"[SYNC] {summary}")
@@ -294,8 +303,8 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         except Exception as e:
             results["errors"].append(f"{member.name}: {e}")
 
-    # Zapisz odznaki do JSONBin jeśli cokolwiek się zmieniło
-    if any("odznaka" in u for u in results.get("updated", [])):
+    # Zapisz do JSONBin jeśli cokolwiek się zmieniło
+    if any("odznaka" in u or "commandBureau" in u for u in results.get("updated", [])):
         await save_officers(officers)
 
     return results
