@@ -155,35 +155,46 @@ async def check_new_akta(guild: nextcord.Guild):
     """Sprawdź czy pojawiły się nowe akta IAD i wyślij je na kanał Discord z pingiem."""
     global _known_akta_ids, _akta_initialized
 
+    log.info(f"[IAD] check_new_akta start — guild: {guild.id}")
+
     record = await fetch_full_record()
+    if not record:
+        log.warning("[IAD] fetch_full_record zwrócił pusty rekord!")
+        return
+
     iad    = record.get("iad", {})
     akta   = iad.get("akta", [])
+    log.info(f"[IAD] Znaleziono {len(akta)} akt w JSONBin")
 
     current_ids = {str(a.get("id")) for a in akta}
 
     if not _akta_initialized:
         _known_akta_ids  = current_ids
         _akta_initialized = True
-        log.info(f"[IAD] Zapamiętano {len(_known_akta_ids)} istniejących akt.")
+        log.info(f"[IAD] Inicjalizacja — zapamiętano {len(_known_akta_ids)} istniejących akt: {_known_akta_ids}")
         return
 
     new_akta = [a for a in akta if str(a.get("id")) not in _known_akta_ids]
+    log.info(f"[IAD] Nowe akta: {len(new_akta)} | znane IDs: {_known_akta_ids} | current IDs: {current_ids}")
+
     if not new_akta:
         return
 
     ch = guild.get_channel(IAD_AKTA_CHANNEL_ID)
+    log.info(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID}: {ch}")
     if not ch:
-        log.warning(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID} nie znaleziony na serwerze.")
+        log.error(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID} NIE ZNALEZIONY — sprawdź czy bot ma dostęp do kanału!")
+        # Wypisz wszystkie dostępne kanały tekstowe
+        text_channels = [f"{c.name}({c.id})" for c in guild.text_channels]
+        log.info(f"[IAD] Dostępne kanały: {text_channels[:20]}")
         return
 
     # Zbuduj mapę: imię IC → member Discord (przez nick OOC z bazy officers)
     officers = record.get("officers", [])
-    # name (IC) → nick (OOC Discord)
     name_to_nick = {
         (o.get("name") or "").strip(): (o.get("nick") or "").strip().lower()
         for o in officers if o.get("name")
     }
-    # nick OOC → Member obiektu Discord
     nick_to_member = {
         m.name.lower(): m
         for m in guild.members if not m.bot
@@ -197,31 +208,32 @@ async def check_new_akta(guild: nextcord.Guild):
         emoji        = KONSEKWENCJA_EMOJI.get(konsekwencja, "📁")
         imie         = (akta_entry.get("imieNazwisko") or "").strip()
 
-        # Znajdź member Discorda po imieniu IC → nicku OOC
         ooc_nick = name_to_nick.get(imie, "")
         member   = nick_to_member.get(ooc_nick) if ooc_nick else None
         ping_str = member.mention if member else None
+        log.info(f"[IAD] Akta dla: '{imie}' → OOC nick: '{ooc_nick}' → member: {member} → ping: {ping_str}")
 
         embed = nextcord.Embed(
             title=f"{emoji} NOWY WPIS W AKTACH IAD — {kons_label}",
             color=color,
             timestamp=datetime.utcnow()
         )
-        embed.add_field(name="👤 Funkcjonariusz", value=imie or "—",                          inline=True)
-        embed.add_field(name="⚖️ Konsekwencja",  value=kons_label,                            inline=True)
-        embed.add_field(name="\u200b",            value="\u200b",                              inline=True)
-        embed.add_field(name="📋 Powód",          value=akta_entry.get("powod") or "—",       inline=False)
-        embed.add_field(name="✍️ Podpisał",       value=akta_entry.get("podpisal") or "—",    inline=True)
-        embed.add_field(name="📅 Data",           value=akta_entry.get("data") or "—",        inline=True)
+        embed.add_field(name="👤 Funkcjonariusz", value=imie or "—",                        inline=True)
+        embed.add_field(name="⚖️ Konsekwencja",  value=kons_label,                          inline=True)
+        embed.add_field(name="\u200b",            value="\u200b",                            inline=True)
+        embed.add_field(name="📋 Powód",          value=akta_entry.get("powod") or "—",     inline=False)
+        embed.add_field(name="✍️ Podpisał",       value=akta_entry.get("podpisal") or "—",  inline=True)
+        embed.add_field(name="📅 Data",           value=akta_entry.get("data") or "—",      inline=True)
         embed.set_footer(text="LSPD IAD — System Akt")
 
         try:
-            # Wyślij ping jako osobna wiadomość (żeby rzeczywiście pingowała), potem embed
-            content = ping_str if ping_str else None
+            content = ping_str  # None jeśli nie znaleziono — Discord sam to obsłuży
             await ch.send(content=content, embed=embed)
-            log.info(f"[IAD] Wysłano akte: {imie} / {kons_label} | ping: {ping_str or 'brak'}")
+            log.info(f"[IAD] ✅ Wysłano akte: {imie} / {kons_label} | ping: {ping_str or 'brak'}")
+        except nextcord.Forbidden:
+            log.error(f"[IAD] ❌ Brak uprawnień do wysłania na kanał {IAD_AKTA_CHANNEL_ID}!")
         except Exception as e:
-            log.error(f"[IAD] Błąd wysyłania akty: {e}")
+            log.error(f"[IAD] ❌ Błąd wysyłania akty: {e}")
 
     _known_akta_ids = current_ids
 
@@ -803,7 +815,62 @@ class LSPDCog(commands.Cog):
         await channel.send(embed=embed, view=TicketSelectView())
         await interaction.response.send_message(f"✅ Panel ticketów wysłany na {channel.mention}.", ephemeral=True)
 
-    @slash_command(name="przypomnienie", description="Sprawdź i przypomnij członkom o brakujących danych w bazie LSPD", guild_ids=[GUILD_ID])
+    @slash_command(name="iad-test", description="Test wysyłania akty IAD na kanał", guild_ids=[GUILD_ID])
+    async def cmd_iad_test(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Brak uprawnień.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        ch = interaction.guild.get_channel(IAD_AKTA_CHANNEL_ID)
+        if not ch:
+            # Wypisz dostępne kanały żeby pomóc zdebugować
+            channels_info = "\n".join(f"• `{c.name}` — `{c.id}`" for c in interaction.guild.text_channels[:30])
+            await interaction.followup.send(
+                f"❌ **Kanał `{IAD_AKTA_CHANNEL_ID}` nie znaleziony!**\n\n"
+                f"Dostępne kanały tekstowe:\n{channels_info}",
+                ephemeral=True
+            )
+            return
+
+        try:
+            embed = nextcord.Embed(
+                title="🧪 TEST — NOWY WPIS W AKTACH IAD",
+                description="To jest wiadomość testowa systemu IAD.",
+                color=0xe74c3c,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="👤 Funkcjonariusz", value="Jan Testowy",        inline=True)
+            embed.add_field(name="⚖️ Konsekwencja",  value="MINUS",              inline=True)
+            embed.add_field(name="📋 Powód",          value="Test systemu IAD",   inline=False)
+            embed.add_field(name="✍️ Podpisał",       value="IAD Chief",          inline=True)
+            embed.add_field(name="📅 Data",           value="2025-01-01",         inline=True)
+            embed.set_footer(text="LSPD IAD — System Akt")
+            await ch.send(content=interaction.user.mention, embed=embed)
+            await interaction.followup.send(f"✅ Test wysłany na {ch.mention}!", ephemeral=True)
+        except nextcord.Forbidden:
+            await interaction.followup.send(
+                f"❌ **Brak uprawnień do wysłania na {ch.mention}!**\n"
+                f"Sprawdź czy bot ma uprawnienie `Send Messages` na tym kanale.",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ Błąd: `{e}`", ephemeral=True)
+
+    @slash_command(name="iad-force-check", description="Wymuś sprawdzenie nowych akt IAD teraz", guild_ids=[GUILD_ID])
+    async def cmd_iad_force_check(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Brak uprawnień.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        global _akta_initialized
+        # Zresetuj flagę żeby wymusić ponowną inicjalizację i wykrycie nowych
+        _akta_initialized = False
+        await check_new_akta(interaction.guild)
+        await interaction.followup.send(
+            f"✅ Sprawdzono akta IAD. Znane IDs: `{len(_known_akta_ids)}`. Sprawdź logi bota po szczegóły.",
+            ephemeral=True
+        )
     async def cmd_przypomnienie(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
