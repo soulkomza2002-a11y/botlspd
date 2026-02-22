@@ -579,7 +579,9 @@ class LSPDCog(commands.Cog):
         embed.set_footer(text="Los Santos Police Department · Ticket System")
 
         await channel.send(embed=embed, view=TicketSelectView())
-        await interaction.response.send_message(f"✅ Panel ticketów wysłany na {channel.mention}.", ephemeral=True) description="Sprawdź i przypomnij członkom o brakujących danych w bazie LSPD", guild_ids=[GUILD_ID])
+        await interaction.response.send_message(f"✅ Panel ticketów wysłany na {channel.mention}.", ephemeral=True)
+
+    @slash_command(name="przypomnienie", description="Sprawdź i przypomnij członkom o brakujących danych w bazie LSPD", guild_ids=[GUILD_ID])
     async def cmd_przypomnienie(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
