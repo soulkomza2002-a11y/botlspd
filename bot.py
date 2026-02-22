@@ -351,10 +351,21 @@ async def auto_sync():
         if ch:
             for e in build_embeds(results, duration):
                 await ch.send(embed=e)
+    await update_status()
 
 @auto_sync.before_loop
 async def before_auto_sync():
     await bot.wait_until_ready()
+
+async def update_status():
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return
+    count = sum(1 for m in guild.members if not m.bot)
+    await bot.change_presence(activity=nextcord.Activity(
+        type=nextcord.ActivityType.watching,
+        name=f"{count} funkcjonariuszy LSPD"
+    ))
 
 # ─── COG Z KOMENDAMI ──────────────────────────────────────────────────────────
 class LSPDCog(commands.Cog):
@@ -590,12 +601,43 @@ class LSPDCog(commands.Cog):
 def officer_map_from(officers: list) -> dict:
     return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
 
+WELCOME_CHANNEL_ID = 1367506926056767532
+
+# ─── POWITANIE NOWYCH CZŁONKÓW ────────────────────────────────────────────────
+@bot.event
+async def on_member_join(member: nextcord.Member):
+    channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
+    if not channel:
+        return
+
+    embed = nextcord.Embed(
+        title="🚔 NOWY REKRUT W SZEREGACH LSPD",
+        description=(
+            f"**{member.mention}** właśnie dołączył do Los Santos Police Department.\n\n"
+            f"Witamy Cię w strukturach jednej z najbardziej prestiżowych formacji w Los Santos. "
+            f"Przed Tobą długa droga — od Kadeta aż po szczyty hierarchii.\n\n"
+            f"📋 **Pierwsze kroki:**\n"
+            f"• Zapoznaj się z regulaminem serwera\n"
+            f"• Stwórz ticket i złóż raport o stopień\n"
+            f"• Ustaw swój pseudonim jako **[Odznaka] Imię Nazwisko IC**\n\n"
+            f"*Stróżuj z honorem. Służ z oddaniem.*"
+        ),
+        color=0x1e5fc4,
+        timestamp=datetime.utcnow()
+    )
+    embed.set_thumbnail(url=member.guild.me.display_avatar.url)
+    embed.set_footer(text=f"Los Santos Police Department · Członek #{member.guild.member_count}")
+
+    await channel.send(embed=embed)
+    await update_status()
+
 # ─── ON READY ─────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     log.info(f"✅ Bot online: {bot.user} | Serwer: {GUILD_ID} | Sync co {SYNC_INTERVAL_MIN} min")
     if not auto_sync.is_running():
         auto_sync.start()
+    await update_status()
 
 # ─── START ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
