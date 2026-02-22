@@ -1001,27 +1001,32 @@ class TicketTypeSelect(nextcord.ui.Select):
             nextcord.SelectOption(label=v["label"], value=k, description=v["description"])
             for k, v in TICKET_TYPES.items()
         ]
-        super().__init__(placeholder="Wybierz rodzaj ticketu...", options=options, min_values=1, max_values=1)
+        super().__init__(
+            placeholder="Wybierz rodzaj ticketu...",
+            options=options,
+            min_values=1,
+            max_values=1,
+            custom_id="ticket_type_select"
+        )
 
     async def callback(self, interaction: Interaction):
-        ticket_type = self.values[0]
-        cfg = TICKET_TYPES[ticket_type]
-        guild = interaction.guild
-
-        # Sprawdź czy użytkownik już ma otwarty ticket tego typu
-        # Użyj ID użytkownika żeby uniknąć kolizji nazw
-        channel_name = f"{cfg['channel_prefix']}-{interaction.user.id}"
-        existing = nextcord.utils.get(guild.text_channels, name=channel_name)
-        if existing:
-            await interaction.response.send_message(
-                f"❌ Masz już otwarty ticket tego typu: {existing.mention}", ephemeral=True
-            )
-            return
-
-        # Odłóż odpowiedź — tworzenie kanału może trwać ponad 3 sekundy
-        await interaction.response.defer(ephemeral=True)
-
         try:
+            ticket_type = self.values[0]
+            cfg = TICKET_TYPES[ticket_type]
+            guild = interaction.guild
+
+            # Sprawdź czy użytkownik już ma otwarty ticket tego typu
+            channel_name = f"{cfg['channel_prefix']}-{interaction.user.id}"
+            existing = nextcord.utils.get(guild.text_channels, name=channel_name)
+            if existing:
+                await interaction.response.send_message(
+                    f"❌ Masz już otwarty ticket tego typu: {existing.mention}", ephemeral=True
+                )
+                return
+
+            # Odłóż odpowiedź — tworzenie kanału może trwać ponad 3 sekundy
+            await interaction.response.defer(ephemeral=True)
+
             # Uprawnienia kanału
             overwrites = {
                 guild.default_role: nextcord.PermissionOverwrite(read_messages=False),
@@ -1067,11 +1072,19 @@ class TicketTypeSelect(nextcord.ui.Select):
             await interaction.followup.send(
                 f"✅ Twój ticket został utworzony: {ticket_channel.mention}", ephemeral=True
             )
+
         except nextcord.Forbidden:
-            await interaction.followup.send("❌ Brak uprawnień do tworzenia kanałów.", ephemeral=True)
+            log.error(f"[TICKET] Brak uprawnień — {interaction.user} / {interaction.guild}")
+            try:
+                await interaction.followup.send("❌ Brak uprawnień do tworzenia kanałów. Skontaktuj się z adminem.", ephemeral=True)
+            except Exception:
+                pass
         except Exception as e:
-            log.error(f"[TICKET] Błąd tworzenia ticketu: {e}")
-            await interaction.followup.send(f"❌ Wystąpił błąd przy tworzeniu ticketu: {e}", ephemeral=True)
+            log.error(f"[TICKET] Błąd tworzenia ticketu: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(f"❌ Wystąpił błąd: {e}", ephemeral=True)
+            except Exception:
+                pass
 
 class TicketSelectView(nextcord.ui.View):
     def __init__(self):
