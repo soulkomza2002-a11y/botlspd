@@ -1006,7 +1006,7 @@ class TicketTypeSelect(nextcord.ui.Select):
             options=options,
             min_values=1,
             max_values=1,
-            custom_id="ticket_type_select"
+            custom_id="persistent_ticket_select"
         )
 
     async def callback(self, interaction: Interaction):
@@ -1090,6 +1090,21 @@ class TicketSelectView(nextcord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TicketTypeSelect())
+
+    @classmethod
+    def create(cls):
+        """Tworzy świeży widok do wysłania na kanał."""
+        return cls()
+
+    async def on_error(self, error: Exception, interaction: Interaction) -> None:
+        log.error(f"[TICKET SELECT ERROR] {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Błąd: {error}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Błąd: {error}", ephemeral=True)
+        except Exception:
+            pass
 
 class CloseTicketView(nextcord.ui.View):
     def __init__(self):
