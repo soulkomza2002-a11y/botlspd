@@ -14,6 +14,7 @@ JSONBIN_BIN_ID    = os.getenv("JSONBIN_BIN_ID")
 JSONBIN_API_KEY   = os.getenv("JSONBIN_API_KEY")
 SYNC_INTERVAL_MIN = int(os.getenv("SYNC_INTERVAL", "5"))
 LOG_CHANNEL_ID    = 1474443852784992418
+IAD_AKTA_CHANNEL_ID = 1473743212966318140
 
 # ─── MAPOWANIE STOPIEŃ → ROLA ─────────────────────────────────────────────────
 RANK_TO_ROLE = {
@@ -117,6 +118,93 @@ async def fetch_officers() -> list:
     except Exception as e:
         log.error(f"JSONBin error: {e}")
         return []
+
+async def fetch_full_record() -> dict:
+    """Pobierz pełny rekord JSONBin (officers, log, regs, ftd, iad)."""
+    url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest"
+    headers = {"X-Master-Key": JSONBIN_API_KEY}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return {}
+                data = await resp.json()
+                return data.get("record", {})
+    except Exception as e:
+        log.error(f"JSONBin fetch_full error: {e}")
+        return {}
+
+# ─── WATCHER AKAT IAD → DISCORD ───────────────────────────────────────────────
+_known_akta_ids: set = set()
+_akta_initialized: bool = False
+
+KONSEKWENCJA_COLOR = {
+    "PLUS":        0x2ecc71,
+    "MINUS":       0xe74c3c,
+    "ZAWIESZENIE":0xf1c40f,
+    "ZWOLNIENIE":  0xff0000,
+}
+KONSEKWENCJA_EMOJI = {
+    "PLUS":        "✅",
+    "MINUS":       "❌",
+    "ZAWIESZENIE": "⏸️",
+    "ZWOLNIENIE":  "🔴",
+}
+
+async def check_new_akta(guild: nextcord.Guild):
+    """Sprawdź czy pojawiły się nowe akta IAD i wyślij je na kanał Discord."""
+    global _known_akta_ids, _akta_initialized
+
+    record = await fetch_full_record()
+    iad = record.get("iad", {})
+    akta = iad.get("akta", [])
+
+    current_ids = {str(a.get("id")) for a in akta}
+
+    if not _akta_initialized:
+        # Pierwsze uruchomienie — zapamiętaj istniejące, nic nie wysyłaj
+        _known_akta_ids = current_ids
+        _akta_initialized = True
+        log.info(f"[IAD] Zapamiętano {len(_known_akta_ids)} istniejących akt.")
+        return
+
+    new_akta = [a for a in akta if str(a.get("id")) not in _known_akta_ids]
+
+    if not new_akta:
+        return
+
+    ch = guild.get_channel(IAD_AKTA_CHANNEL_ID)
+    if not ch:
+        log.warning(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID} nie znaleziony.")
+        return
+
+    for akta_entry in new_akta:
+        konsekwencja = akta_entry.get("konsekwencja", "MINUS")
+        czas = akta_entry.get("zawieszenieCzas", "")
+        kons_label = konsekwencja + (f" — {czas}" if konsekwencja == "ZAWIESZENIE" and czas else "")
+        color = KONSEKWENCJA_COLOR.get(konsekwencja, 0x888888)
+        emoji = KONSEKWENCJA_EMOJI.get(konsekwencja, "📁")
+
+        embed = nextcord.Embed(
+            title=f"{emoji} NOWA AKTE IAD — {kons_label}",
+            color=color,
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="👤 Funkcjonariusz", value=akta_entry.get("imieNazwisko") or "—", inline=True)
+        embed.add_field(name="⚖️ Konsekwencja",  value=kons_label,                              inline=True)
+        embed.add_field(name="\u200b",            value="\u200b",                                inline=True)
+        embed.add_field(name="📋 Powód",          value=akta_entry.get("powod") or "—",         inline=False)
+        embed.add_field(name="✍️ Podpisał",       value=akta_entry.get("podpisal") or "—",      inline=True)
+        embed.add_field(name="📅 Data",           value=akta_entry.get("data") or "—",          inline=True)
+        embed.set_footer(text="LSPD IAD — System Akt")
+
+        try:
+            await ch.send(embed=embed)
+            log.info(f"[IAD] Wysłano akte: {akta_entry.get('imieNazwisko')} / {kons_label}")
+        except Exception as e:
+            log.error(f"[IAD] Błąd wysyłania akty: {e}")
+
+    _known_akta_ids = current_ids
 
 # ─── ZAPIS DO JSONBIN ────────────────────────────────────────────────────────
 async def save_officers(officers: list) -> bool:
@@ -351,6 +439,10 @@ async def auto_sync():
         if ch:
             for e in build_embeds(results, duration):
                 await ch.send(embed=e)
+
+    # ── Sprawdź nowe akta IAD ──────────────────────────────────────────────
+    await check_new_akta(guild)
+
     await update_status()
 
 @auto_sync.before_loop
