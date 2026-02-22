@@ -471,13 +471,21 @@ async def auto_sync():
             for e in build_embeds(results, duration):
                 await ch.send(embed=e)
 
-    # ── Sprawdź nowe akta IAD ──────────────────────────────────────────────
-    await check_new_akta(guild)
-
     await update_status()
 
 @auto_sync.before_loop
 async def before_auto_sync():
+    await bot.wait_until_ready()
+
+# ── Osobny task sprawdzający akta IAD co minutę (szybka reakcja) ──────────────
+@tasks.loop(minutes=1)
+async def iad_akta_watch():
+    guild = bot.get_guild(GUILD_ID)
+    if guild:
+        await check_new_akta(guild)
+
+@iad_akta_watch.before_loop
+async def before_iad_watch():
     await bot.wait_until_ready()
 
 async def update_status():
@@ -1001,64 +1009,69 @@ class TicketTypeSelect(nextcord.ui.Select):
         guild = interaction.guild
 
         # Sprawdź czy użytkownik już ma otwarty ticket tego typu
-        existing = nextcord.utils.get(
-            guild.text_channels,
-            name=f"{cfg['channel_prefix']}-{interaction.user.name.lower().replace(' ', '-')}"
-        )
+        # Użyj ID użytkownika żeby uniknąć kolizji nazw
+        channel_name = f"{cfg['channel_prefix']}-{interaction.user.id}"
+        existing = nextcord.utils.get(guild.text_channels, name=channel_name)
         if existing:
             await interaction.response.send_message(
                 f"❌ Masz już otwarty ticket tego typu: {existing.mention}", ephemeral=True
             )
             return
 
-        # Uprawnienia kanału
-        overwrites = {
-            guild.default_role: nextcord.PermissionOverwrite(read_messages=False),
-            interaction.user:   nextcord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me:           nextcord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-        }
-        for role_id in cfg["roles"]:
-            role = guild.get_role(role_id)
-            if role:
-                overwrites[role] = nextcord.PermissionOverwrite(read_messages=True, send_messages=True)
+        # Odłóż odpowiedź — tworzenie kanału może trwać ponad 3 sekundy
+        await interaction.response.defer(ephemeral=True)
 
-        # Kategoria — ta sama co kanał ticketów
-        ticket_ch = guild.get_channel(TICKET_CHANNEL_ID)
-        category = ticket_ch.category if ticket_ch else None
+        try:
+            # Uprawnienia kanału
+            overwrites = {
+                guild.default_role: nextcord.PermissionOverwrite(read_messages=False),
+                interaction.user:   nextcord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me:           nextcord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            }
+            for role_id in cfg["roles"]:
+                role = guild.get_role(role_id)
+                if role:
+                    overwrites[role] = nextcord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        channel_name = f"{cfg['channel_prefix']}-{interaction.user.name.lower().replace(' ', '-')}"
-        ticket_channel = await guild.create_text_channel(
-            name=channel_name,
-            overwrites=overwrites,
-            category=category,
-            reason=f"Ticket: {cfg['label']} — {interaction.user}"
-        )
+            # Kategoria — ta sama co kanał ticketów
+            ticket_ch = guild.get_channel(TICKET_CHANNEL_ID)
+            category = ticket_ch.category if ticket_ch else None
 
-        # Embed powitalny w tickecie
-        embed = nextcord.Embed(
-            title=cfg["label"],
-            description=(
-                f"Witaj {interaction.user.mention}!\n\n"
-                f"{cfg['description']}\n\n"
-                f"Opisz swoją sprawę jak najdokładniej. "
-                f"Odpowiedni personel zajmie się Twoim zgłoszeniem wkrótce.\n\n"
-                f"Aby zamknąć ticket użyj przycisku poniżej."
-            ),
-            color=cfg["color"],
-            timestamp=datetime.utcnow()
-        )
-        embed.set_thumbnail(url=guild.me.display_avatar.url)
-        embed.set_footer(text="LSPD Ticket System")
+            ticket_channel = await guild.create_text_channel(
+                name=channel_name,
+                overwrites=overwrites,
+                category=category,
+                reason=f"Ticket: {cfg['label']} — {interaction.user}"
+            )
 
-        roles_mentions = " ".join(
-            f"<@&{r}>" for r in cfg["roles"]
-        )
+            # Embed powitalny w tickecie
+            embed = nextcord.Embed(
+                title=cfg["label"],
+                description=(
+                    f"Witaj {interaction.user.mention}!\n\n"
+                    f"{cfg['description']}\n\n"
+                    f"Opisz swoją sprawę jak najdokładniej. "
+                    f"Odpowiedni personel zajmie się Twoim zgłoszeniem wkrótce.\n\n"
+                    f"Aby zamknąć ticket użyj przycisku poniżej."
+                ),
+                color=cfg["color"],
+                timestamp=datetime.utcnow()
+            )
+            embed.set_thumbnail(url=guild.me.display_avatar.url)
+            embed.set_footer(text="LSPD Ticket System")
 
-        view = CloseTicketView()
-        await ticket_channel.send(content=roles_mentions, embed=embed, view=view)
-        await interaction.response.send_message(
-            f"✅ Twój ticket został utworzony: {ticket_channel.mention}", ephemeral=True
-        )
+            roles_mentions = " ".join(f"<@&{r}>" for r in cfg["roles"])
+
+            view = CloseTicketView()
+            await ticket_channel.send(content=roles_mentions, embed=embed, view=view)
+            await interaction.followup.send(
+                f"✅ Twój ticket został utworzony: {ticket_channel.mention}", ephemeral=True
+            )
+        except nextcord.Forbidden:
+            await interaction.followup.send("❌ Brak uprawnień do tworzenia kanałów.", ephemeral=True)
+        except Exception as e:
+            log.error(f"[TICKET] Błąd tworzenia ticketu: {e}")
+            await interaction.followup.send(f"❌ Wystąpił błąd przy tworzeniu ticketu: {e}", ephemeral=True)
 
 class TicketSelectView(nextcord.ui.View):
     def __init__(self):
@@ -1090,6 +1103,8 @@ async def on_ready():
     bot.add_view(CloseTicketView())
     if not auto_sync.is_running():
         auto_sync.start()
+    if not iad_akta_watch.is_running():
+        iad_akta_watch.start()
     # Zainicjalizuj znane akta IAD żeby nie spamować przy starcie
     guild = bot.get_guild(GUILD_ID)
     if guild:
