@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LSPD — Database</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;500;600;700&family=Source+Sans+3:wght@300;400;600&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback, useEffect, useRef } = React;
+
+// ════════════════════════════════════════════════════════════════════════════
+//  KONFIGURACJA BAZY DANYCH (JSONBin.io — darmowe, bez serwera)
+//
+//  SETUP (2 minuty):
+//  1. Wejdź na https://jsonbin.io → zarejestruj się
+//  2. Kliknij "New Bin" → wklej: {"officers":[],"log":[],"regs":[]}
+//  3. Zapisz → skopiuj BIN ID z URL (np. 65abc123def456...)
+//  4. Dashboard → API Keys → skopiuj klucz (zaczyna się od $2b$...)
+//  5. Wklej poniżej i wgraj plik na hosting
+// ════════════════════════════════════════════════════════════════════════════
+const JSONBIN_BIN_ID  = "6998859343b1c97be98eb84c";
+const JSONBIN_API_KEY = "$2a$10$3L8S1mGNReuQXCj1pvYGaeUH0o1HosE59kmJC6exDhU.1aVPMY0fy";
+const USE_CLOUD = JSONBIN_BIN_ID !== "WKLEJ_TU_BIN_ID";
+
+// ─── DISCORD WEBHOOK ─────────────────────────────────────────────────────────
+const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1474894360976818387/iD9K7sjZJ27TTOy64pu-CLknm3RY23fjThI8GsRD8FOPoLkHlznA8g4ECvYydmXktxnt";
+
+async function sendDiscordLog(embed) {
+  try {
+    await fetch(DISCORD_WEBHOOK, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ embeds: [embed] })
+    });
+  } catch(e) { console.warn("Discord webhook error:", e); }
+}
+
+function discordEmbed(title, description, color, fields) {
+  return {
+    title,
+    description: description || undefined,
+    color,
+    fields: fields || [],
+    timestamp: new Date().toISOString(),
+    footer: { text: "LSPD Database" }
+  };
+}
+
+// ─── STOPNIE (zgodne z Kompendium LSPD) ─────────────────────────────────────
+const RANKS = [
+  "Chief of Police",
+  "Assistant Chief",
+  "Deputy Chief",
+  "Commander",
+  "Captain",
+  "Lieutenant II",
+  "Lieutenant I",
+  "Master Sergeant",
+  "Staff Sergeant",
+  "Sergeant",
+  "Officer III+1",
+  "Officer III",
+  "Officer II",
+  "Officer I",
+  "Cadet",
+];
+
+const RANK_BADGES = {
+  "Chief of Police": "COP",
+  "Assistant Chief":  "AC",
+  "Deputy Chief":     "DC",
+  "Commander":        "CMD",
+  "Captain":          "CPT",
+  "Lieutenant II":    "LT II",
+  "Lieutenant I":     "LT I",
+  "Master Sergeant":  "MSG",
+  "Staff Sergeant":   "SSG",
+  "Sergeant":         "SGT",
+  "Officer III+1":    "OFC III+",
+  "Officer III":      "OFC III",
+  "Officer II":       "OFC II",
+  "Officer I":        "OFC I",
+  "Cadet":        	  "CDT"};
+
+
+// ─── PRZEDZIAŁY ODZNAK DLA STOPNI ────────────────────────────────────────────
+const RANK_BADGE_RANGES = {
+  "High Command":    [1,   9],   // Chief of Police, Assistant Chief, Deputy Chief, Commander
+  "Captain":        [10,  19],
+  "Lieutenant II":  [20,  29],
+  "Lieutenant I":   [30,  39],
+  "Master Sergeant":[40,  49],
+  "Staff Sergeant": [50,  59],
+  "Sergeant":       [60,  69],
+  "Officer III+1":  [70,  79],
+  "Officer III":    [80,  99],
+  "Officer II":     [100, 129],
+  "Officer I":      [130, 199],
+  "Cadet":          [200, 299],
+};
+
+// Mapowanie stopnia → klucz przedziału
+const RANK_TO_RANGE_KEY = {
+  "Chief of Police": "High Command",
+  "Assistant Chief": "High Command",
+  "Deputy Chief":    "High Command",
+  "Commander":       "High Command",
+  "Captain":         "Captain",
+  "Lieutenant II":   "Lieutenant II",
+  "Lieutenant I":    "Lieutenant I",
+  "Master Sergeant": "Master Sergeant",
+  "Staff Sergeant":  "Staff Sergeant",
+  "Sergeant":        "Sergeant",
+  "Officer III+1":   "Officer III+1",
+  "Officer III":     "Officer III",
+  "Officer II":      "Officer II",
+  "Officer I":       "Officer I",
+  "Cadet":           "Cadet",
+};
+
+// Znajdź najniższą wolną odznakę w przedziale dla danego stopnia (z wiodącymi zerami)
+function assignBadge(rank, officers) {
+  const rangeKey = RANK_TO_RANGE_KEY[rank];
+  if (!rangeKey) return "";
+  const [min, max] = RANK_BADGE_RANGES[rangeKey];
+  const used = new Set(officers.map(o => parseInt(o.badge)).filter(n => !isNaN(n)));
+  const digits = Math.max(2, String(max).length);
+  for (let b = min; b <= max; b++) {
+    if (!used.has(b)) return String(b).padStart(digits, '0');
+  }
+  return "";
+}
+
+const ADMIN_CREDENTIALS = [
+  { login: "komisarz", password: "lspd2025",  role: "Komisarz",        badge: "00"  },
+  { login: "chief",    password: "chief2025",  role: "Chief of Police", badge: "101" },
+  { login: "zarzad",   password: "zarzad2025", role: "Zarząd",          badge: "ZRZ" },
+];
+
+// ─── DANE STARTOWE ────────────────────────────────────────────────────────────
+const INIT = {
+  officers: [
+    { id:1,  badge:"101", name:"Martin Forrest",    nick:"soulek",        rank:"Chief of Police", dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:true,  seu:true,  sv:true,  wu:true, pwc:true,  nt:false, k9:false, notes:"" },
+    { id:2,  badge:"102", name:"Jurek Shelton",      nick:"oloff",         rank:"Assistant Chief", dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:true,  seu:true,  sv:true,  wu:true, pwc:true,  nt:false, k9:false, notes:"" },
+    { id:3,  badge:"103", name:"Andrew Goebbels",    nick:"negzu.",        rank:"Deputy Chief",    dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:true,  seu:true,  sv:true,  wu:true, pwc:true,  nt:false, k9:false, notes:"" },
+    { id:4,  badge:"104", name:"Dimitri Pietrenkov", nick:"gloslektora",   rank:"Commander",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:true,  seu:true,  sv:true,  wu:true, pwc:true,  nt:false, k9:false, notes:"" },
+    { id:5,  badge:"201", name:"Sen Tia",            nick:"wodurnn",       rank:"Captain",         dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:true,  seu:true,  sv:true,  wu:true, pwc:false, nt:false, k9:false, notes:"" },
+    { id:6,  badge:"202", name:"Kaz Moretti",        nick:"exofrmdao",     rank:"Captain",         dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:true,  seu:false, sv:true,  wu:true, pwc:false, nt:false, k9:false, notes:"" },
+    { id:7,  badge:"203", name:"Tony O'Kelly",       nick:"wlamik",        rank:"Lieutenant II",   dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:true,  seu:false, sv:true,  wu:true, pwc:false, nt:false, k9:false, notes:"" },
+    { id:8,  badge:"204", name:"Sonny Davis",        nick:"Husik",         rank:"Lieutenant I",    dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:true,  seu:false, sv:true,  wu:true, pwc:false, nt:false, k9:false, notes:"" },
+    { id:9,  badge:"205", name:"Sara Frost",         nick:"Agacior",       rank:"Sergeant",        dept:"IAD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:true,  ftd:false, fac:true,  seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:10, badge:"206", name:"Rone Konley",        nick:"j0rem",         rank:"Sergeant",        dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:11, badge:"207", name:"Mark Anderson",      nick:"kuronq",        rank:"Officer III+1",   dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:12, badge:"208", name:"Anthony White",      nick:".lynxu",        rank:"Officer III+1",   dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:13, badge:"209", name:"Jack Africano",      nick:"fileq.",        rank:"Officer III",     dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:14, badge:"210", name:"Michael Winter",     nick:"Naturalny",     rank:"Officer II",      dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:15, badge:"211", name:"Liam Jones",         nick:"krrzychu",      rank:"Officer II",      dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:16, badge:"212", name:"Andrew Manson",      nick:"monke",         rank:"Officer II",      dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:17, badge:"213", name:"Janusz Stevens",     nick:"mlixxy",        rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:18, badge:"214", name:"Jacob Tazer",        nick:"fazeheazgrall", rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:19, badge:"215", name:"Arthur McKanne",     nick:"hansik",        rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:20, badge:"216", name:"Tomas Hill",         nick:"gumis19_",      rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:21, badge:"217", name:"Barry White",        nick:"wodzirej_og",   rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:22, badge:"218", name:"Jack Flash",         nick:".garnek_",      rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:23, badge:"219", name:"Michael White",      nick:"michalos_sigma",rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:24, badge:"301", name:"Chica Void",         nick:"inka7777",      rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:25, badge:"302", name:"Leon Young",         nick:"alezajebalem",  rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+    { id:26, badge:"303", name:"Layla Void",         nick:"naducha",       rank:"Officer I",       dept:"LSPD", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, wu:false, pwc:false, nt:false, k9:false, notes:"" },
+  ],
+  log: [
+    { id:1, date:"2024-07-30", name:"Tomas Hill",  start:"21:00", end:"01:30", hours:4.5, report:"Była jedna strzelanina gdzie 4 napastników zostało zatrzymanych." },
+    { id:2, date:"2024-07-30", name:"Sonny Davis", start:"12:49", end:"14:55", hours:2.0, report:"Służba spokojna, kilka napadów na kasetki, jeden nieudany pościg." },
+    { id:3, date:"2024-08-01", name:"Jack Flash",  start:"20:40", end:"23:40", hours:3.0, report:"Porwanie funkcjonariuszy zakończone powodzeniem." },
+    { id:4, date:"2024-08-02", name:"Sonny Davis", start:"18:00", end:"20:00", hours:2.0, report:"Pościg, strzelanina, jedno zatrzymanie." },
+  ],
+  regs: [
+    { id:1,  text:"Wyciągamy pałkę/tazer jeżeli napastnik posiada broń białą w ręku." },
+    { id:2,  text:"Wyciągamy broń palną jeżeli napastnik posiada broń palną w ręku." },
+    { id:3,  text:"Strzelamy dopiero jeżeli jesteśmy 100% pewni, że wyceluje w naszym kierunku." },
+    { id:4,  text:"NIE NADUŻYWAMY TASERÓW! Korzystamy z nich tylko w ostateczności." },
+    { id:5,  text:"Używamy tylko stroje z szafek policyjnych — bez modyfikacji." },
+    { id:6,  text:"Officer I może używać tylko pałki policyjnej i tasera, chyba że ma licencję na broń." },
+    { id:7,  text:"Zakaz łamania zasad ruchu drogowego (wyjątek: KOD 3)." },
+    { id:8,  text:"ZAKAZ KORUPCJI!" },
+    { id:9,  text:"Wchodzenie do budynku gdy są zakładnicy to ostateczność." },
+    { id:10, text:"Zakaz PIT/RAM w centrum — poza miastem dozwolone." },
+    { id:11, text:"Minimalny czas służby tygodniowo: 10h." },
+    { id:12, text:"Radio to nie telefon — krótkie i przemyślane komunikaty." },
+    { id:13, text:"Zarząd LSPD ma prawo zwolnić pracownika nie podając przyczyny." },
+    { id:14, text:"Zakaz korupcji, kradzieży mienia służbowego oraz działania na szkodę LSPD." },
+  ] };
+
+// ─── GRUPY STOPNI → kolor wiersza ────────────────────────────────────────────
+function getRankGroup(rank) {
+  if (["Chief of Police","Assistant Chief","Deputy Chief","Commander"].includes(rank)) return "highcommand";
+  if (rank === "Captain") return "captain";
+  if (["Lieutenant II","Lieutenant I"].includes(rank)) return "lieutenant";
+  if (["Master Sergeant","Staff Sergeant","Sergeant"].includes(rank)) return "sergeant";
+  if (["Officer III+1","Officer III","Officer II","Officer I"].includes(rank)) return "officer";
+  if (rank === "Cadet") return "cadet";
+  return "officer";
+}
+
+function getRankColor(rank) {
+  const g = getRankGroup(rank);
+  if (g === "highcommand") return { row:"rgba(128,0,128,0.10)", name:"#c084fc" };
+  if (g === "captain")     return { row:"rgba(231,76,60,0.07)",  name:"#ff8a7a" };
+  if (g === "lieutenant")  return { row:"rgba(155,89,182,0.07)", name:"#c39bd3" };
+  if (g === "sergeant")    return { row:"rgba(30,95,196,0.10)",  name:"#7fb3ff" };
+  if (g === "cadet")       return { row:"rgba(32,178,72,0.07)",  name:"#5dde85" };
+  return { row:"rgba(255,255,255,0.02)", name:"var(--white)" };
+}
+
+// ─── BAZA DANYCH (JSONBin chmura + localStorage fallback) ────────────────────
+const dbApi = {
+  async load() {
+    if (USE_CLOUD) {
+      try {
+        const res = await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}/latest`, {
+          headers: { "X-Master-Key": JSONBIN_API_KEY }
+        });
+        if (res.ok) {
+          const json = await res.json();
+          const rec = json.record;
+          if (rec && rec.officers && rec.officers.length > 0) return rec;
+        }
+      } catch(e) { console.warn("JSONBin load failed:", e); }
+    }
+    try {
+      const o = localStorage.getItem("lspd-officers");
+      const l = localStorage.getItem("lspd-log");
+      const r = localStorage.getItem("lspd-regs");
+      return {
+        officers: o ? JSON.parse(o) : INIT.officers,
+        log:      l ? JSON.parse(l) : INIT.log,
+        regs:     r ? JSON.parse(r) : INIT.regs };
+    } catch { return INIT; }
+  },
+
+  async save(data) {
+    try {
+      localStorage.setItem("lspd-officers", JSON.stringify(data.officers));
+      localStorage.setItem("lspd-log",      JSON.stringify(data.log));
+      localStorage.setItem("lspd-regs",     JSON.stringify(data.regs));
+    } catch {}
+    if (USE_CLOUD) {
+      const res = await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Master-Key": JSONBIN_API_KEY },
+        body: JSON.stringify(data)
+      });
+      if (!res.ok) throw new Error("JSONBin PUT failed");
+    }
+  }
+};
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function getStatus(o) {
+  if (o.suspended)   return { label:"ZAWIESZONY", cls:"s-suspended" };
+  if (o.redEntry)    return { label:"CZERWONY",   cls:"s-red"       };
+  if (o.yellowEntry) return { label:"ŻÓŁTY",      cls:"s-yellow"    };
+  if (o.onLeave)     return { label:"URLOP",       cls:"s-leave"     };
+  return { label:"AKTYWNY", cls:"s-active" };
+}
+
+
+function Ck({ val }) {
+  return val
+    ? <span style={{color:"#2ecc71",fontSize:14}}>✓</span>
+    : <span style={{color:"#3a4a60",fontSize:14}}>—</span>;
+}
+
+function SaveIndicator({ status }) {
+  if (status === "idle") return null;
+  const cfg = {
+    saving: { color:"var(--gold)",  text:"Zapisywanie..." },
+    saved:  { color:"var(--green)", text:"Zapisano ✓"     },
+    error:  { color:"var(--red)",   text:"Błąd zapisu!"   } }[status] || {};
+  return (
+    <div style={{
+      position:"fixed", bottom:20, right:20, zIndex:9999,
+      background:"rgba(8,16,31,0.96)", border:`1px solid ${cfg.color}`,
+      borderRadius:4, padding:"8px 16px",
+      fontFamily:"'Share Tech Mono',monospace", fontSize:11, letterSpacing:2,
+      color:cfg.color, boxShadow:`0 0 20px rgba(0,0,0,.5)`
+    }}>{cfg.text}</div>
+  );
+}
+
+// ─── CSS ─────────────────────────────────────────────────────────────────────
+const CSS = `
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --navy:#08101f;--navy2:#0d1829;--blue:#1a3a6e;--accent:#1e5fc4;
+  --gold:#c8a84b;--gold2:#e8c96a;--red:#e74c3c;--green:#2ecc71;
+  --white:#edf2ff;--gray:#8a9ab5;--dim:#3a4a60;
+  --card:rgba(255,255,255,0.03);--border:rgba(255,255,255,0.07)
+}
+body{background:var(--navy);color:var(--white);font-family:'Source Sans 3',sans-serif;min-height:100vh}
+.app{display:flex;flex-direction:column;min-height:100vh}
+.topbar{background:linear-gradient(135deg,#000510,#050d20);border-bottom:2px solid var(--gold);position:sticky;top:0;z-index:200}
+.topbar-stripe{height:4px;background:repeating-linear-gradient(90deg,var(--accent) 0,var(--accent) 40px,var(--gold) 40px,var(--gold) 44px)}
+.topbar-inner{display:flex;align-items:center;gap:16px;padding:12px 24px;flex-wrap:wrap}
+.topbar-logo{font-family:'Oswald',sans-serif;font-size:26px;font-weight:700;letter-spacing:6px;color:var(--gold)}
+.topbar-sub{font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--gray);letter-spacing:2px}
+.back-btn{font-family:'Share Tech Mono',monospace;font-size:10px;letter-spacing:2px;color:var(--gray);background:rgba(255,255,255,0.04);border:1px solid var(--dim);padding:6px 12px;border-radius:3px;cursor:pointer;text-decoration:none;transition:all .2s;white-space:nowrap;flex-shrink:0}
+.back-btn:hover{color:var(--gold);border-color:var(--gold)}
+.topbar-nav{display:flex;gap:2px;flex-wrap:wrap}
+.nav-btn{background:none;border:none;color:var(--gray);font-family:'Oswald',sans-serif;font-size:12px;letter-spacing:2px;padding:8px 14px;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;text-transform:uppercase}
+.nav-btn:hover,.nav-btn.active{color:var(--gold);border-bottom-color:var(--gold);background:rgba(200,168,75,.05)}
+.topbar-auth{display:flex;align-items:center;gap:10px;margin-left:auto;padding-left:16px;border-left:1px solid var(--dim);flex-wrap:wrap;flex-shrink:0}
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.dot-on{background:#2ecc71;box-shadow:0 0 8px #2ecc71;animation:blink 2s infinite}
+.dot-off{background:var(--dim)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
+.main{flex:1;padding:32px 24px;max-width:1400px;margin:0 auto;width:100%}
+.card{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:24px;margin-bottom:20px}
+.card-title{font-family:'Oswald',sans-serif;font-size:20px;font-weight:600;letter-spacing:3px;margin-bottom:16px;display:flex;align-items:center;gap:12px}
+.tag{font-family:'Share Tech Mono',monospace;font-size:10px;background:rgba(30,95,196,.2);border:1px solid rgba(30,95,196,.3);color:var(--accent);padding:3px 8px;border-radius:2px}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:24px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:4px;padding:16px;text-align:center;border-top:2px solid}
+.stat-card.blue{border-top-color:var(--accent)}.stat-card.gold{border-top-color:var(--gold)}
+.stat-card.red{border-top-color:var(--red)}.stat-card.green{border-top-color:var(--green)}
+.stat-num{font-family:'Oswald',sans-serif;font-size:32px;font-weight:700}
+.stat-label{font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--gray);letter-spacing:2px;margin-top:4px}
+.tbl-wrap{overflow-x:auto;border-radius:4px;border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{background:rgba(200,168,75,.07);font-family:'Oswald',sans-serif;font-size:11px;letter-spacing:2px;color:var(--gold);padding:10px 12px;text-align:left;border-bottom:1px solid rgba(200,168,75,.2);white-space:nowrap;text-transform:uppercase}
+tbody tr{border-bottom:1px solid var(--border);transition:background .15s}
+tbody tr:hover{background:rgba(30,95,196,.07)}
+tbody td{padding:10px 12px;vertical-align:middle;color:var(--gray)}
+.name{color:var(--white);font-weight:600}
+.badge-num{font-family:'Share Tech Mono',monospace;color:var(--accent);font-size:12px}
+.rk{display:inline-block;font-family:'Share Tech Mono',monospace;font-size:10px;background:rgba(30,95,196,.15);border:1px solid rgba(30,95,196,.25);color:var(--accent);padding:2px 6px;border-radius:2px;white-space:nowrap}
+.status{display:inline-block;font-family:'Share Tech Mono',monospace;font-size:10px;padding:2px 8px;border-radius:2px;font-weight:bold;letter-spacing:1px}
+.s-active{background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.3);color:#2ecc71}
+.s-suspended{background:rgba(231,76,60,.15);border:1px solid rgba(231,76,60,.3);color:#e74c3c}
+.s-leave{background:rgba(230,126,34,.15);border:1px solid rgba(230,126,34,.3);color:#e67e22}
+.s-yellow{background:rgba(241,196,15,.15);border:1px solid rgba(241,196,15,.3);color:#f1c40f}
+.s-red{background:rgba(231,76,60,.15);border:1px solid rgba(231,76,60,.3);color:#e74c3c}
+.btn{display:inline-flex;align-items:center;gap:6px;font-family:'Oswald',sans-serif;font-size:12px;letter-spacing:2px;padding:8px 16px;border-radius:3px;border:none;cursor:pointer;transition:all .2s;text-transform:uppercase}
+.btn-primary{background:var(--accent);color:white}.btn-primary:hover{background:#2568d4}
+.btn-gold{background:rgba(200,168,75,.15);border:1px solid var(--gold);color:var(--gold)}.btn-gold:hover{background:rgba(200,168,75,.25)}
+.btn-red{background:rgba(231,76,60,.15);border:1px solid var(--red);color:var(--red)}.btn-red:hover{background:rgba(231,76,60,.25)}
+.btn-sm{padding:5px 10px;font-size:10px}
+.form-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px}
+.fg{display:flex;flex-direction:column;gap:4px}
+.fg label{font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--gray);letter-spacing:2px;text-transform:uppercase}
+.fg input,.fg select,.fg textarea{background:rgba(255,255,255,.04);border:1px solid var(--dim);border-radius:3px;color:var(--white);padding:8px 10px;font-size:13px;font-family:'Source Sans 3',sans-serif;transition:border .2s}
+.fg input:focus,.fg select:focus,.fg textarea:focus{outline:none;border-color:var(--accent)}
+.fg select option{background:#0d1829}.fg textarea{resize:vertical;min-height:70px}
+.search-bar{display:flex;gap:10px;margin-bottom:16px;align-items:center;flex-wrap:wrap}
+.search-input,.filter-sel{background:rgba(255,255,255,.04);border:1px solid var(--dim);border-radius:3px;color:var(--white);padding:9px 12px;font-size:13px;font-family:'Source Sans 3',sans-serif}
+.search-input{flex:1;min-width:180px}.search-input:focus{outline:none;border-color:var(--accent)}
+.filter-sel option{background:#0d1829}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal{background:#0d1829;border:1px solid rgba(200,168,75,.3);border-radius:6px;width:100%;max-width:700px;max-height:90vh;overflow-y:auto;padding:28px}
+.modal-title{font-family:'Oswald',sans-serif;font-size:22px;font-weight:600;letter-spacing:3px;color:var(--gold);margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.modal-footer{display:flex;gap:10px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+.checks-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin:10px 0}
+.check-item{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--gray);cursor:pointer;padding:6px 10px;border-radius:3px;border:1px solid var(--border);transition:all .15s}
+.check-item:hover{background:rgba(30,95,196,.1);border-color:rgba(30,95,196,.3)}
+.check-item input{accent-color:var(--accent)}
+.login-card{background:#0d1829;border:1px solid rgba(200,168,75,.3);border-radius:6px;padding:48px 40px;width:100%;max-width:400px;text-align:center}
+.login-logo{font-family:'Oswald',sans-serif;font-size:48px;font-weight:700;letter-spacing:8px;color:var(--gold);margin-bottom:4px}
+.login-sub{font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--gray);letter-spacing:3px;margin-bottom:32px}
+.login-err{background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);color:var(--red);padding:10px;border-radius:3px;font-size:13px;margin-bottom:16px}
+.alert{padding:12px 16px;border-radius:3px;border-left:3px solid;font-size:13px;margin-bottom:16px}
+.alert-gold{border-color:var(--gold);background:rgba(200,168,75,.08);color:var(--gold2)}
+.alert-blue{border-color:var(--accent);background:rgba(30,95,196,.08);color:#a8c8ff}
+.alert-red{border-color:var(--red);background:rgba(231,76,60,.08);color:#ff9999}
+.section-tabs{display:flex;gap:4px;margin-bottom:20px;flex-wrap:wrap}
+.tab{font-family:'Oswald',sans-serif;font-size:12px;letter-spacing:2px;padding:8px 16px;border-radius:3px;border:1px solid var(--dim);color:var(--gray);cursor:pointer;transition:all .2s;background:none;text-transform:uppercase}
+.tab:hover{border-color:var(--accent);color:var(--accent)}
+.tab.active{background:rgba(30,95,196,.2);border-color:var(--accent);color:var(--white)}
+.dept-badge{font-family:'Share Tech Mono',monospace;font-size:10px;padding:2px 7px;border-radius:2px;background:rgba(30,95,196,.2);border:1px solid rgba(30,95,196,.3);color:var(--accent)}
+.actions{display:flex;gap:6px;flex-wrap:wrap}
+.page-title{font-family:'Oswald',sans-serif;font-size:24px;font-weight:700;letter-spacing:3px}
+.page-sub{font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--gray);letter-spacing:2px;margin-top:4px;margin-bottom:20px}
+.loading-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:16px}
+.loading-logo{font-family:'Oswald',sans-serif;font-size:48px;font-weight:700;letter-spacing:8px;color:var(--gold)}
+.loading-bar{width:200px;height:2px;background:var(--dim);border-radius:2px;overflow:hidden}
+.loading-inner{height:100%;width:40%;background:var(--gold);animation:loadanim 1.2s ease-in-out infinite}
+@keyframes loadanim{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}
+.loading-text{font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--gray);letter-spacing:3px}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px}
+@media(max-width:700px){.topbar-nav{order:3;width:100%}.form-row{grid-template-columns:1fr}}
+`;
+
+// ─── KOMPONENTY ───────────────────────────────────────────────────────────────
+
+function LoginModal({ onLogin, onClose }) {
+  const [login, setLogin] = useState(""); const [pass, setPass] = useState(""); const [err, setErr] = useState("");
+  const submit = () => { const f = ADMIN_CREDENTIALS.find(c=>c.login===login&&c.password===pass); f?onLogin(f):setErr("Nieprawidłowy login lub hasło."); };
+  return (
+    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="login-card">
+        <div className="login-logo">LSPD</div>
+        <div className="login-sub">PANEL ZARZĄDU — DOSTĘP ZASTRZEŻONY</div>
+        {err&&<div className="login-err">{err}</div>}
+        <div className="fg" style={{marginBottom:12,textAlign:"left"}}><label>Login</label><input value={login} onChange={e=>setLogin(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} autoFocus/></div>
+        <div className="fg" style={{marginBottom:20,textAlign:"left"}}><label>Hasło</label><input type="password" value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()}/></div>
+        <div style={{display:"flex",gap:8}}>
+          <button className="btn btn-gold" style={{flex:1,justifyContent:"center"}} onClick={submit}>ZALOGUJ</button>
+          <button className="btn btn-red btn-sm" onClick={onClose}>✕</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OfficerModal({ officer, onSave, onClose, isNew }) {
+  const blank = { badge:"", name:"", nick:"", rank:"Officer I", suspended:false, redEntry:false, yellowEntry:false, onLeave:false, swat:false, iad:false, ftd:false, fac:false, seu:false, sv:false, nt:false, pwc:false, wu:false, k9:false, asu:false, notes:"" };
+  const [form, setForm] = useState(officer || blank);
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  return (
+    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal">
+        <div className="modal-title">{isNew?"DODAJ FUNKCJONARIUSZA":"EDYTUJ FUNKCJONARIUSZA"}</div>
+        <div className="form-row">
+          {!isNew&&<div className="fg"><label>Odznaka</label><input value={form.badge} readOnly style={{opacity:0.5,cursor:"not-allowed"}}/></div>}
+          <div className="fg"><label>Imię i Nazwisko</label><input value={form.name} onChange={e=>set("name",e.target.value)}/></div>
+          <div className="fg"><label>Nick OOC (nazwa konta Discord)</label><input value={form.nick} onChange={e=>set("nick",e.target.value)}/></div>
+        </div>
+        {isNew&&<div style={{fontSize:11,color:"var(--gold)",fontFamily:"'Share Tech Mono',monospace",marginBottom:8}}>⚡ Odznaka zostanie przydzielona automatycznie na podstawie stopnia</div>}
+        <div className="form-row">
+          <div className="fg"><label>Stopień</label>
+            <select value={form.rank} onChange={e=>set("rank",e.target.value)}>
+              {RANKS.map(r=><option key={r} value={r}>{RANK_BADGES[r]} — {r}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{fontFamily:"'Oswald',sans-serif",fontSize:13,letterSpacing:2,color:"var(--gold)",margin:"14px 0 6px"}}>STATUS</div>
+        <div className="checks-grid">
+          {[["suspended","Zawieszony"],["redEntry","Czerwony wpis"],["yellowEntry","Żółty wpis"],["onLeave","Urlop"]].map(([k,l])=>(
+            <label key={k} className="check-item"><input type="checkbox" checked={!!form[k]} onChange={e=>set(k,e.target.checked)}/>{l}</label>
+          ))}
+        </div>
+        <div style={{fontFamily:"'Oswald',sans-serif",fontSize:13,letterSpacing:2,color:"var(--gold)",margin:"14px 0 6px"}}>JEDNOSTKI SPECJALNE</div>
+        <div className="checks-grid">
+          {[["swat","SWAT"],["iad","IAD"],["ftd","FTD"]].map(([k,l])=>(
+            <label key={k} className="check-item"><input type="checkbox" checked={!!form[k]} onChange={e=>set(k,e.target.checked)}/>{l}</label>
+          ))}
+        </div>
+        <div style={{fontFamily:"'Oswald',sans-serif",fontSize:13,letterSpacing:2,color:"var(--gold)",margin:"14px 0 6px"}}>UPRAWNIENIA</div>
+        <div className="checks-grid">
+          {[["fac","FAC"],["seu","SEU"],["sv","SV"],["nt","NT"],["pwc","PWC"],["wu","WU"],["k9","K9"],["asu","ASU"]].map(([k,l])=>(
+            <label key={k} className="check-item"><input type="checkbox" checked={!!form[k]} onChange={e=>set(k,e.target.checked)}/>{l}</label>
+          ))}
+        </div>
+        <div style={{marginTop:14}}><div className="fg"><label>Notatki</label><textarea value={form.notes} onChange={e=>set("notes",e.target.value)}/></div></div>
+        <div className="modal-footer">
+          <button className="btn btn-red btn-sm" onClick={onClose}>ANULUJ</button>
+          <button className="btn btn-primary btn-sm" onClick={()=>onSave(form)}>ZAPISZ</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function Dashboard({ officers, log }) {
+  const active = officers.filter(o=>!o.suspended&&!o.onLeave).length;
+  const suspended = officers.filter(o=>o.suspended).length;
+  const swatCnt = officers.filter(o=>o.swat).length;
+  const iadCnt = officers.filter(o=>o.iad).length;
+  const ftdCnt  = officers.filter(o=>o.ftd).length;
+  return (
+    <div>
+      <div style={{marginBottom:24}}>
+        <div style={{fontFamily:"'Oswald',sans-serif",fontSize:28,fontWeight:700,letterSpacing:4}}>PANEL GŁÓWNY <span style={{color:"var(--gold)"}}>LSPD</span></div>
+        <div style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,color:"var(--gray)",letterSpacing:2,marginTop:4}}>LOS SANTOS POLICE DEPARTMENT — SYSTEM ZARZĄDZANIA</div>
+      </div>
+      {!USE_CLOUD&&<div className="alert alert-red">⚠ <strong>TRYB LOKALNY</strong> — dane zapisują się TYLKO na tym urządzeniu. Aby synchronizować między urządzeniami, skonfiguruj JSONBin (patrz komentarz w pliku).</div>}
+      {USE_CLOUD&&<div className="alert alert-blue">☁ <strong>TRYB CHMURY</strong> — dane synchronizowane przez JSONBin. Zmiany widoczne na wszystkich urządzeniach.</div>}
+      <div className="stats-row">
+        <div className="stat-card blue"><div className="stat-num" style={{color:"var(--accent)"}}>{officers.length}</div><div className="stat-label">Funkcjonariuszy</div></div>
+        <div className="stat-card green"><div className="stat-num" style={{color:"var(--green)"}}>{active}</div><div className="stat-label">Aktywnych</div></div>
+        <div className="stat-card red"><div className="stat-num" style={{color:"var(--red)"}}>{suspended}</div><div className="stat-label">Zawieszonych</div></div>
+        <div className="stat-card gold"><div className="stat-num" style={{color:"var(--gold)"}}>{log.length}</div><div className="stat-label">Wpisów</div></div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:16}}>
+        <div className="card">
+          <div className="card-title">Jednostki Specjalne <span className="tag">UNITS</span></div>
+          {[["SWAT",swatCnt,"var(--red)"],["IAD",iadCnt,"var(--gold)"],["FTD",ftdCnt,"var(--accent)"]].map(([name,cnt,color])=>(
+            <div key={name} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 0",borderBottom:"1px solid var(--border)"}}>
+              <span className="rk" style={{minWidth:48,textAlign:"center"}}>{name}</span>
+              <div style={{flex:1,height:4,background:"var(--border)",borderRadius:2,overflow:"hidden"}}>
+                <div style={{width:`${officers.length?Math.min(100,(cnt/officers.length)*100):0}%`,height:"100%",background:color,borderRadius:2,transition:"width .5s"}}/>
+              </div>
+              <span style={{fontFamily:"'Share Tech Mono',monospace",fontSize:13,color,minWidth:24,textAlign:"right"}}>{cnt}</span>
+            </div>
+          ))}
+        </div>
+        <div className="card">
+          <div className="card-title">Ostatnie Wpisy <span className="tag">LOG</span></div>
+          {[...log].reverse().slice(0,4).map(l=>(
+            <div key={l.id} style={{borderBottom:"1px solid var(--border)",paddingBottom:10,marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                <span style={{color:"var(--white)",fontWeight:600,fontSize:13}}>{l.name}</span>
+                <span style={{fontFamily:"'Share Tech Mono',monospace",fontSize:10,color:"var(--gray)"}}>{l.date} · {l.hours}h</span>
+              </div>
+              <div style={{fontSize:12,color:"var(--gray)",lineHeight:1.5}}>{(l.report||"").slice(0,90)}{(l.report||"").length>90?"…":""}</div>
+            </div>
+          ))}
+          {log.length===0&&<div style={{color:"var(--dim)",fontSize:12,textAlign:"center",padding:16}}>Brak wpisów</div>}
+        </div>
+        <div className="card">
+          <div className="card-title">Hierarchia <span className="tag">RANKS</span></div>
+          {RANKS.map(r=>{ const cnt=officers.filter(o=>o.rank===r).length; if(!cnt) return null; return (
+            <div key={r} style={{display:"flex",alignItems:"center",gap:10,marginBottom:7}}>
+              <span className="rk">{RANK_BADGES[r]}</span>
+              <div style={{flex:1,fontSize:12,color:"var(--gray)"}}>{r}</div>
+              <div style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,color:"var(--accent)",width:18,textAlign:"right"}}>{cnt}</div>
+            </div>
+          ); })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BulkEditModal({ officers, selectedIds, onSave, onClose }) {
+  const blank = { rank:"", suspended:null, redEntry:null, yellowEntry:null, onLeave:null,
+    swat:null, iad:null, ftd:null, fac:null, seu:null, sv:null, nt:null, pwc:null, wu:null, k9:null };
+  const [form, setForm] = useState(blank);
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const triOpts = [{label:"—",val:null},{label:"✓",val:true},{label:"✗",val:false}];
+  const boolFields = [["suspended","Zawieszony"],["redEntry","Czerwony wpis"],["yellowEntry","Żółty wpis"],["onLeave","Urlop"],
+    ["swat","SWAT"],["iad","IAD"],["ftd","FTD"],["fac","FAC"],["seu","SEU"],["sv","SV"],["nt","NT"],["pwc","PWC"],["wu","WU"],["k9","K9"],["asu","ASU"]];
+  return (
+    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal">
+        <div className="modal-title">EDYTUJ ZAZNACZONYCH ({selectedIds.size})</div>
+        <div style={{fontSize:11,color:"var(--gray)",marginBottom:12,fontFamily:"'Share Tech Mono',monospace"}}>
+          Tylko wypełnione pola zostaną zmienione. "—" oznacza brak zmiany.
+        </div>
+        <div className="form-row">
+          <div className="fg"><label>Stopień (opcjonalnie)</label>
+            <select value={form.rank} onChange={e=>set("rank",e.target.value)}>
+              <option value="">— bez zmiany —</option>
+              {RANKS.map(r=><option key={r} value={r}>{RANK_BADGES[r]} — {r}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{fontFamily:"'Oswald',sans-serif",fontSize:13,letterSpacing:2,color:"var(--gold)",margin:"14px 0 6px"}}>STATUSY I JEDNOSTKI</div>
+        <div className="checks-grid">
+          {boolFields.map(([k,l])=>(
+            <div key={k} style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--gray)"}}>{l}</label>
+              <div style={{display:"flex",gap:4}}>
+                {triOpts.map(({label,val})=>(
+                  <button key={label} onClick={()=>set(k,val)}
+                    style={{padding:"2px 8px",fontSize:12,cursor:"pointer",borderRadius:3,border:"1px solid var(--border)",
+                      background: form[k]===val ? "var(--accent)" : "var(--card)",
+                      color: form[k]===val ? "#fff" : "var(--gray)"}}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-red btn-sm" onClick={onClose}>ANULUJ</button>
+          <button className="btn btn-primary btn-sm" onClick={()=>onSave(form)}>ZASTOSUJ DO ZAZNACZONYCH</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OfficersView({ officers, setOfficers, isAdmin }) {
+  const [search, setSearch] = useState("");
+  const [filterUnit,   setFilterUnit]   = useState("ALL");
+  const [filterStatus, setFilterStatus] = useState("ALL");
+  const [filterRank,   setFilterRank]   = useState("ALL");
+  const [modal, setModal] = useState(null);
+  const [selected, setSelected] = useState(new Set());
+  const [bulkModal, setBulkModal] = useState(false);
+
+  const sortByBadge = arr => [...arr].sort((a,b) => {
+    const na = parseInt(a.badge);
+    const nb = parseInt(b.badge);
+    const aEmpty = !a.badge || isNaN(na);
+    const bEmpty = !b.badge || isNaN(nb);
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1;
+    if (bEmpty) return -1;
+    if (na !== nb) return na - nb;
+    return (a.badge||"").localeCompare(b.badge||"");
+  });
+
+  const filtered = sortByBadge(officers.filter(o=>{
+    const q=search.toLowerCase();
+    const okQ = !q||o.name.toLowerCase().includes(q)||o.badge.includes(q)||(o.nick||"").toLowerCase().includes(q);
+    const okU = filterUnit==="ALL" || o[filterUnit]===true;
+    const okS = filterStatus==="ALL" || getStatus(o).label===filterStatus;
+    const okR = filterRank==="ALL" || o.rank===filterRank;
+    return okQ && okU && okS && okR;
+  }));
+  const save = form => {
+    if(modal.type==="add") {
+      const badge = assignBadge(form.rank, officers);
+      const newOfficer = {...form, badge, id:Date.now()};
+      setOfficers(p=>sortByBadge([...p, newOfficer]));
+      sendDiscordLog(discordEmbed(
+        "➕ Dodano funkcjonariusza",
+        null,
+        0x2ecc71,
+        [
+          { name: "Imię i Nazwisko", value: form.name || "—", inline: true },
+          { name: "Nick",            value: form.nick || "—", inline: true },
+          { name: "Stopień",         value: form.rank || "—", inline: true },
+          { name: "Odznaka",         value: badge ? "#"+badge : "—", inline: true },
+        ]
+      ));
+    } else {
+      setOfficers(p=>sortByBadge(p.map(o=>{
+        if(o.id!==modal.officer.id) return o;
+        let badge = form.badge;
+        if(form.rank !== o.rank) { badge = assignBadge(form.rank, p); }
+        const updated = {...form, badge, id:o.id};
+        // Wykryj zmiany do loga
+        const changes = [];
+        if(form.name !== o.name) changes.push(`Imię: **${o.name}** → **${form.name}**`);
+        if(form.nick !== o.nick) changes.push(`Nick: **${o.nick}** → **${form.nick}**`);
+        if(form.rank !== o.rank) changes.push(`Stopień: **${o.rank}** → **${form.rank}**`);
+        if(badge !== o.badge)    changes.push(`Odznaka: **#${o.badge}** → **#${badge}**`);
+        const statusFields = [["suspended","Zawieszony"],["redEntry","Czerwony wpis"],["yellowEntry","Żółty wpis"],["onLeave","Urlop"]];
+        statusFields.forEach(([k,l])=>{ if(form[k]!==o[k]) changes.push(`${l}: **${o[k]?"TAK":"NIE"}** → **${form[k]?"TAK":"NIE"}**`); });
+        if(changes.length>0) {
+          sendDiscordLog(discordEmbed(
+            "✏️ Edytowano funkcjonariusza",
+            null,
+            0x3498db,
+            [
+              { name: "Funkcjonariusz", value: `${form.name} (${form.nick||"—"})`, inline: false },
+              { name: "Zmiany", value: changes.join("\n"), inline: false },
+            ]
+          ));
+        }
+        return updated;
+      })));
+    }
+    setModal(null);
+  };
+  const remove = id => {
+    if(window.confirm("Usunąć funkcjonariusza?")) {
+      const officer = officers.find(o=>o.id===id);
+      setOfficers(p=>p.filter(o=>o.id!==id));
+      setSelected(s=>{const n=new Set(s);n.delete(id);return n;});
+      if(officer) sendDiscordLog(discordEmbed(
+        "🗑️ Usunięto funkcjonariusza",
+        null,
+        0xe74c3c,
+        [
+          { name: "Imię i Nazwisko", value: officer.name || "—", inline: true },
+          { name: "Nick",            value: officer.nick || "—", inline: true },
+          { name: "Stopień",         value: officer.rank || "—", inline: true },
+          { name: "Odznaka",         value: officer.badge ? "#"+officer.badge : "—", inline: true },
+        ]
+      ));
+    }
+  };
+
+  const toggleSelect = id => setSelected(s=>{const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n;});
+  const toggleAll = () => setSelected(s => s.size===filtered.length ? new Set() : new Set(filtered.map(o=>o.id)));
+
+  const bulkRemove = () => {
+    if(!window.confirm(`Usunąć ${selected.size} zaznaczonych funkcjonariuszy?`)) return;
+    const removed = officers.filter(o=>selected.has(o.id));
+    setOfficers(p=>p.filter(o=>!selected.has(o.id)));
+    setSelected(new Set());
+    sendDiscordLog(discordEmbed(
+      "🗑️ Usunięto wielu funkcjonariuszy (bulk)",
+      null,
+      0xe74c3c,
+      [{ name: `Usunięto ${removed.length} osób`, value: removed.map(o=>`• ${o.name} (${o.nick||"—"})`).join("\n").slice(0,1000) || "—", inline: false }]
+    ));
+  };
+
+  const bulkSave = form => {
+    const affected = officers.filter(o=>selected.has(o.id));
+    setOfficers(p=>sortByBadge(p.map(o=>{
+      if(!selected.has(o.id)) return o;
+      const updated = {...o};
+      if(form.rank) {
+        updated.rank = form.rank;
+        const ranges = {"Chief of Police":[1,9],"Assistant Chief":[1,9],"Deputy Chief":[1,9],"Commander":[1,9],
+          "Captain":[10,19],"Lieutenant II":[20,29],"Lieutenant I":[30,39],"Master Sergeant":[40,49],
+          "Staff Sergeant":[50,59],"Sergeant":[60,69],"Officer III+1":[70,79],"Officer III":[80,99],
+          "Officer II":[100,129],"Officer I":[130,199],"Cadet":[200,299]};
+        const [lo,hi] = ranges[form.rank]||[0,0];
+        const badgeNum = parseInt(o.badge)||0;
+        if(o.rank !== form.rank || badgeNum<lo || badgeNum>hi) updated.badge = assignBadge(form.rank, p);
+      }
+      Object.keys(form).forEach(k=>{ if(k!=="rank" && form[k]!==null) updated[k]=form[k]; });
+      return updated;
+    })));
+    const changes = [];
+    if(form.rank) changes.push(`Stopień → **${form.rank}**`);
+    const statusFields = [["suspended","Zawieszony"],["redEntry","Czerwony wpis"],["yellowEntry","Żółty wpis"],["onLeave","Urlop"],["swat","SWAT"],["iad","IAD"],["ftd","FTD"]];
+    statusFields.forEach(([k,l])=>{ if(form[k]!==null) changes.push(`${l} → **${form[k]?"TAK":"NIE"}**`); });
+    sendDiscordLog(discordEmbed(
+      "✏️ Edytowano wielu funkcjonariuszy (bulk)",
+      null,
+      0xf39c12,
+      [
+        { name: `Zmieniono ${affected.length} osób`, value: affected.map(o=>`• ${o.name}`).join("\n").slice(0,500) || "—", inline: false },
+        { name: "Zastosowane zmiany", value: changes.join("\n") || "Brak zmian", inline: false },
+      ]
+    ));
+    setSelected(new Set());
+    setBulkModal(false);
+  };
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,flexWrap:"wrap",gap:12}}>
+        <div><div className="page-title">BAZA FUNKCJONARIUSZY</div><div className="page-sub">{filtered.length} / {officers.length} REKORDÓW</div></div>
+        {isAdmin&&<button className="btn btn-primary" onClick={()=>setModal({type:"add"})}>+ DODAJ FP</button>}
+      </div>
+      <div className="search-bar">
+        <input className="search-input" placeholder="Szukaj: nazwisko, odznaka, nick..." value={search} onChange={e=>setSearch(e.target.value)}/>
+        <select className="filter-sel" value={filterRank} onChange={e=>setFilterRank(e.target.value)}>
+          <option value="ALL">Wszystkie stopnie</option>
+          {RANKS.map(r=><option key={r} value={r}>{RANK_BADGES[r]} — {r}</option>)}
+        </select>
+        <select className="filter-sel" value={filterUnit} onChange={e=>setFilterUnit(e.target.value)}>
+          <option value="ALL">Wszystkie jednostki</option>
+          <option value="swat">SWAT</option>
+          <option value="iad">IAD</option>
+          <option value="ftd">FTD</option>
+        </select>
+        <select className="filter-sel" value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}>
+          <option value="ALL">Wszystkie statusy</option>
+          <option>AKTYWNY</option><option>ZAWIESZONY</option><option>URLOP</option><option>ŻÓŁTY</option>
+        </select>
+      </div>
+      {isAdmin&&selected.size>0&&(
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",marginBottom:8,background:"rgba(30,95,196,0.12)",border:"1px solid rgba(30,95,196,0.3)",borderRadius:4}}>
+          <span style={{fontFamily:"'Share Tech Mono',monospace",fontSize:12,color:"var(--accent)"}}>Zaznaczono: {selected.size}</span>
+          <button className="btn btn-gold btn-sm" onClick={()=>setBulkModal(true)}>✎ EDYTUJ ZAZNACZONE</button>
+          <button className="btn btn-red btn-sm" onClick={bulkRemove}>✕ USUŃ ZAZNACZONE</button>
+          <button className="btn btn-sm" style={{marginLeft:"auto",background:"transparent",border:"1px solid var(--border)",color:"var(--gray)"}} onClick={()=>setSelected(new Set())}>Odznacz wszystkie</button>
+        </div>
+      )}
+      <div className="tbl-wrap">
+        <table>
+          <thead><tr>
+            {isAdmin&&<th style={{width:32}}><input type="checkbox" checked={filtered.length>0&&selected.size===filtered.length} onChange={toggleAll}/></th>}
+            <th>Odznaka</th><th>Imię i Nazwisko</th><th>Nick</th><th>Stopień</th><th>Status</th>
+            <th>SWAT</th><th>IAD</th><th>FTD</th>
+            <th style={{borderLeft:"2px solid rgba(200,168,75,0.3)"}}>FAC</th><th>SEU</th><th>SV</th><th>NT</th><th>PWC</th><th>WU</th><th>K9</th><th>ASU</th>
+            {isAdmin&&<th>Akcje</th>}
+          </tr></thead>
+          <tbody>
+            {(() => {
+              const rows = [];
+              filtered.forEach((o, i) => {
+                const st = getStatus(o);
+                const isAlert = o.suspended || o.redEntry;
+                const isCB = o.commandBureau;
+                const rc = getRankColor(o.rank);
+                const curGroup = getRankGroup(o.rank);
+                const prevGroup = i > 0 ? getRankGroup(filtered[i-1].rank) : curGroup;
+                const groupBorder = i > 0 && curGroup !== prevGroup
+                  ? "3px solid rgba(255,255,255,0.12)"
+                  : "1px solid var(--border)";
+                const rowBg = isAlert ? "rgba(231,76,60,0.13)" : isCB ? "rgba(30,95,196,0.10)" : rc.row;
+                const rowShadow = isAlert ? "inset 3px 0 0 #e74c3c" : isCB ? "inset 3px 0 0 #4a7fd4" : "none";
+                const nameCl = isAlert ? "#ff4444" : isCB ? "#7fb3ff" : rc.name;
+                rows.push(
+                  <tr key={o.id} style={{background:selected.has(o.id)?"rgba(30,95,196,0.18)":rowBg, borderTop:groupBorder, boxShadow:rowShadow}}>
+                    {isAdmin&&<td><input type="checkbox" checked={selected.has(o.id)} onChange={()=>toggleSelect(o.id)}/></td>}
+                    <td><span className="badge-num" style={isAlert?{color:"#ff4444"}:{}}>{o.badge ? "#"+o.badge : ""}</span></td>
+                    <td className="name" style={{color:nameCl, textShadow:isAlert?"0 0 10px rgba(231,76,60,0.5)":"none"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        {o.name}
+                        {isCB&&<span style={{fontFamily:"'Share Tech Mono',monospace",fontSize:10,fontWeight:700,color:"#e8c96a",background:"rgba(200,168,75,0.15)",border:"1px solid rgba(200,168,75,0.4)",borderRadius:3,padding:"1px 5px",letterSpacing:1}}>CB</span>}
+                        {getRankGroup(o.rank)==="highcommand"&&<span style={{fontFamily:"'Share Tech Mono',monospace",fontSize:10,fontWeight:700,color:"#d4bfff",background:"rgba(30,10,50,0.75)",border:"1px solid rgba(160,100,255,0.35)",borderRadius:3,padding:"1px 5px",letterSpacing:1}}>HC</span>}
+                      </div>
+                    </td>
+                    <td style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,color:isAlert?"rgba(255,100,100,0.7)":"var(--gray)"}}>{o.nick}</td>
+                    <td><div style={{display:"flex",flexDirection:"column",gap:3}}><span className="rk">{RANK_BADGES[o.rank]||o.rank}</span><span style={{fontSize:11,color:"var(--gray)"}}>{o.rank}</span></div></td>
+                    <td><span className={`status ${st.cls}`}>{st.label}</span></td>
+                    <td><Ck val={o.swat}/></td><td><Ck val={o.iad}/></td><td><Ck val={o.ftd}/></td>
+                    <td style={{borderLeft:"2px solid rgba(200,168,75,0.3)"}}><Ck val={o.fac}/></td>
+                    <td><Ck val={o.seu}/></td><td><Ck val={o.sv}/></td>
+                    <td><Ck val={o.nt}/></td><td><Ck val={o.pwc}/></td><td><Ck val={o.wu}/></td><td><Ck val={o.k9}/></td><td><Ck val={o.asu}/></td>
+                    {isAdmin&&<td><div className="actions">
+                      <button className="btn btn-gold btn-sm" onClick={()=>setModal({type:"edit",officer:o})}>EDYTUJ</button>
+                      <button className="btn btn-red btn-sm" onClick={()=>remove(o.id)}>USUŃ</button>
+                    </div></td>}
+                  </tr>
+                );
+              });
+              return rows;
+            })()}
+            {filtered.length===0&&<tr><td colSpan={16} style={{textAlign:"center",padding:32,color:"var(--gray)"}}>Brak wyników</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {modal&&<OfficerModal officer={modal.officer} isNew={modal.type==="add"} onSave={save} onClose={()=>setModal(null)}/>}
+      {bulkModal&&<BulkEditModal officers={officers} selectedIds={selected} onSave={bulkSave} onClose={()=>setBulkModal(false)}/>}
+    </div>
+  );
+}
+
+function LogView({ log, setLog, officers, isAdmin }) {
+  const [search, setSearch] = useState("");
+  const [showForm, setShowForm] = useState(false);
+
+  // Formularz dostępny dla WSZYSTKICH (nie tylko admina)
+  const today = new Date().toISOString().slice(0,10);
+  const emptyForm = { name:"", date:today, start:"", end:"", hours:"", report:"" };
+  const [form, setForm] = useState(emptyForm);
+  const setF = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  const filtered = log.filter(l=>{ const q=search.toLowerCase(); return !q||l.name.toLowerCase().includes(q)||(l.report||"").toLowerCase().includes(q); });
+
+  const submit = () => {
+    if(!form.name||!form.hours){ alert("Wypełnij wymagane pola (funkcjonariusz + godziny)."); return; }
+    setLog(p=>[...p,{...form,id:Date.now()}]);
+    sendDiscordLog(discordEmbed(
+      "📋 Dodano raport ze służby",
+      null,
+      0x9b59b6,
+      [
+        { name: "Funkcjonariusz", value: form.name,                          inline: true  },
+        { name: "Data",           value: form.date || "—",                   inline: true  },
+        { name: "Godziny",        value: form.hours ? form.hours+"h" : "—",  inline: true  },
+        { name: "Czas służby",    value: (form.start && form.end) ? `${form.start}–${form.end}` : "—", inline: true },
+        { name: "Raport",         value: (form.report || "—").slice(0, 300), inline: false },
+      ]
+    ));
+    setForm(emptyForm);
+    setShowForm(false);
+  };
+  const remove = id => {
+    if(window.confirm("Usunąć wpis?")) {
+      const entry = log.find(l=>l.id===id);
+      setLog(p=>p.filter(l=>l.id!==id));
+      if(entry) sendDiscordLog(discordEmbed(
+        "🗑️ Usunięto wpis z dziennika",
+        null,
+        0xe67e22,
+        [
+          { name: "Funkcjonariusz", value: entry.name || "—", inline: true },
+          { name: "Data",           value: entry.date || "—", inline: true },
+          { name: "Godziny",        value: entry.hours ? entry.hours+"h" : "—", inline: true },
+        ]
+      ));
+    }
+  };
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,flexWrap:"wrap",gap:12}}>
+        <div><div className="page-title">DZIENNIK SŁUŻB</div><div className="page-sub">{log.length} WPISÓW</div></div>
+        <button className="btn btn-primary" onClick={()=>setShowForm(s=>!s)}>
+          {showForm ? "✕ ANULUJ" : "+ DODAJ RAPORT"}
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="card" style={{marginBottom:20,border:"1px solid rgba(200,168,75,.2)"}}>
+          <div style={{fontFamily:"'Oswald',sans-serif",fontSize:16,letterSpacing:3,color:"var(--gold)",marginBottom:16}}>NOWY RAPORT ZE SŁUŻBY</div>
+          <div className="form-row">
+            <div className="fg"><label>Funkcjonariusz *</label>
+              <select value={form.name} onChange={e=>setF("name",e.target.value)}>
+                <option value="">— wybierz —</option>
+                {officers.map(o=><option key={o.id}>{o.name}</option>)}
+              </select>
+            </div>
+            <div className="fg"><label>Data *</label><input type="date" value={form.date} onChange={e=>setF("date",e.target.value)}/></div>
+          </div>
+          <div className="form-row">
+            <div className="fg"><label>Początek służby</label><input type="time" value={form.start} onChange={e=>setF("start",e.target.value)}/></div>
+            <div className="fg"><label>Koniec służby</label><input type="time" value={form.end} onChange={e=>setF("end",e.target.value)}/></div>
+            <div className="fg"><label>Liczba godzin *</label><input type="number" step="0.5" min="0" value={form.hours} onChange={e=>setF("hours",e.target.value)}/></div>
+          </div>
+          <div className="fg" style={{marginBottom:16}}><label>Raport ze służby</label><textarea rows={4} value={form.report} onChange={e=>setF("report",e.target.value)} placeholder="Opis przebiegu służby..."/></div>
+          <div style={{display:"flex",gap:8}}>
+            <button className="btn btn-primary" onClick={submit}>ZAPISZ RAPORT</button>
+            <button className="btn btn-red btn-sm" onClick={()=>{setShowForm(false);setForm(emptyForm);}}>ANULUJ</button>
+          </div>
+        </div>
+      )}
+
+      <div className="search-bar"><input className="search-input" placeholder="Szukaj po nazwisku lub treści..." value={search} onChange={e=>setSearch(e.target.value)}/></div>
+      <div className="tbl-wrap">
+        <table>
+          <thead><tr><th>Data</th><th>Funkcjonariusz</th><th>Czas</th><th>Godziny</th><th>Raport</th>{isAdmin&&<th>Akcje</th>}</tr></thead>
+          <tbody>
+            {[...filtered].reverse().map(l=>(
+              <tr key={l.id}>
+                <td style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,whiteSpace:"nowrap"}}>{l.date}</td>
+                <td className="name">{l.name}</td>
+                <td style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,color:"var(--gray)",whiteSpace:"nowrap"}}>{l.start&&l.end?`${l.start}–${l.end}`:l.start||"—"}</td>
+                <td><span style={{fontFamily:"'Share Tech Mono',monospace",color:"var(--accent)",fontWeight:"bold"}}>{l.hours}h</span></td>
+                <td style={{fontSize:12,color:"var(--gray)",maxWidth:320}}>{l.report}</td>
+                {isAdmin&&<td><button className="btn btn-red btn-sm" onClick={()=>remove(l.id)}>USUŃ</button></td>}
+              </tr>
+            ))}
+            {filtered.length===0&&<tr><td colSpan={6} style={{textAlign:"center",padding:32,color:"var(--gray)"}}>Brak wpisów</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function RegulationsView({ regs, setRegs, isAdmin }) {
+  const [editing, setEditing] = useState(null); const [adding, setAdding] = useState(false); const [newText, setNewText] = useState("");
+  const save   = (id,text) => { setRegs(p=>p.map(r=>r.id===id?{...r,text}:r)); setEditing(null); };
+  const add    = () => { if(!newText.trim()) return; setRegs(p=>[...p,{id:Date.now(),text:newText.trim()}]); setNewText(""); setAdding(false); };
+  const remove = id => { if(window.confirm("Usunąć punkt?")) setRegs(p=>p.filter(r=>r.id!==id)); };
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,flexWrap:"wrap",gap:12}}>
+        <div><div className="page-title">REGULAMIN LSPD</div><div className="page-sub">{regs.length} PUNKTÓW</div></div>
+        {isAdmin&&<button className="btn btn-primary" onClick={()=>setAdding(true)}>+ DODAJ PUNKT</button>}
+      </div>
+      {adding&&(
+        <div className="card" style={{marginBottom:16}}>
+          <div className="fg" style={{marginBottom:10}}><label>Nowy punkt regulaminu</label><textarea value={newText} onChange={e=>setNewText(e.target.value)} rows={3}/></div>
+          <div style={{display:"flex",gap:8}}>
+            <button className="btn btn-primary btn-sm" onClick={add}>DODAJ</button>
+            <button className="btn btn-red btn-sm" onClick={()=>{setAdding(false);setNewText("");}}>ANULUJ</button>
+          </div>
+        </div>
+      )}
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {regs.map((r,i)=>(
+          <div key={r.id} style={{display:"flex",gap:12,alignItems:"flex-start",background:"var(--card)",border:"1px solid var(--border)",borderRadius:4,padding:"14px 16px"}}>
+            <div style={{fontFamily:"'Share Tech Mono',monospace",fontSize:16,color:"var(--accent)",minWidth:28,fontWeight:"bold"}}>{String(i+1).padStart(2,"0")}</div>
+            {editing===r.id
+              ? <div style={{flex:1}}><textarea defaultValue={r.text} rows={2} style={{width:"100%",background:"rgba(255,255,255,.04)",border:"1px solid var(--accent)",borderRadius:3,color:"var(--white)",padding:"6px 8px",fontSize:13,fontFamily:"'Source Sans 3',sans-serif"}} onBlur={e=>save(r.id,e.target.value)} autoFocus/></div>
+              : <div style={{flex:1,fontSize:14,color:"var(--gray)",lineHeight:1.6}}>{r.text}</div>}
+            {isAdmin&&<div style={{display:"flex",gap:4,flexShrink:0}}>
+              <button className="btn btn-gold btn-sm" onClick={()=>setEditing(editing===r.id?null:r.id)}>EDYTUJ</button>
+              <button className="btn btn-red btn-sm" onClick={()=>remove(r.id)}>✕</button>
+            </div>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── ROOT APP ─────────────────────────────────────────────────────────────────
+function App() {
+  const [loading,    setLoading]    = useState(true);
+  const [showLogin,  setShowLogin]  = useState(false);
+  const [saveStatus, setSaveStatus] = useState("idle");
+
+  // Sesja — zapamiętana w sessionStorage (trwa do zamknięcia karty)
+  const [admin, setAdminRaw] = useState(() => {
+    try { const s = sessionStorage.getItem("lspd-session"); return s ? JSON.parse(s) : null; } catch { return null; }
+  });
+  const setAdmin = (user) => {
+    setAdminRaw(user);
+    try { user ? sessionStorage.setItem("lspd-session", JSON.stringify(user)) : sessionStorage.removeItem("lspd-session"); } catch {}
+  };
+
+  // Aktywna zakładka — zapamiętana w sessionStorage
+  const [page, setPageRaw] = useState(() => {
+    try { return sessionStorage.getItem("lspd-page") || "dashboard"; } catch { return "dashboard"; }
+  });
+  const setPage = (p) => {
+    setPageRaw(p);
+    try { sessionStorage.setItem("lspd-page", p); } catch {}
+  };
+
+  const [officers, setOfficersRaw] = useState([]);
+  const [log,      setLogRaw]      = useState([]);
+  const [regs,     setRegsRaw]     = useState([]);
+
+  // Refs żeby mieć zawsze aktualne wartości w callbackach
+  const officersRef = useRef([]);
+  const logRef      = useRef([]);
+  const regsRef     = useRef([]);
+
+  useEffect(() => { officersRef.current = officers; }, [officers]);
+  useEffect(() => { logRef.current      = log;      }, [log]);
+  useEffect(() => { regsRef.current     = regs;     }, [regs]);
+
+  // Ładowanie danych
+  useEffect(() => {
+    dbApi.load().then(data => {
+      setOfficersRaw(data.officers || INIT.officers);
+      setLogRaw(data.log           || INIT.log);
+      setRegsRaw(data.regs         || INIT.regs);
+      setLoading(false);
+    });
+  }, []);
+
+  // Auto-save z debounce
+  const saveTimer = useRef(null);
+  const save = useCallback((officers, log, regs) => {
+    setSaveStatus("saving");
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await dbApi.save({ officers, log, regs });
+        setSaveStatus("saved");
+        setTimeout(() => setSaveStatus("idle"), 2000);
+      } catch(e) {
+        console.error("Save error:", e);
+        setSaveStatus("error");
+        setTimeout(() => setSaveStatus("idle"), 3000);
+      }
+    }, 800);
+  }, []);
+
+  const setOfficers = useCallback(upd => {
+    setOfficersRaw(prev => {
+      const next = typeof upd === "function" ? upd(prev) : upd;
+      save(next, logRef.current, regsRef.current);
+      return next;
+    });
+  }, [save]);
+
+  const setLog = useCallback(upd => {
+    setLogRaw(prev => {
+      const next = typeof upd === "function" ? upd(prev) : upd;
+      save(officersRef.current, next, regsRef.current);
+      return next;
+    });
+  }, [save]);
+
+  const setRegs = useCallback(upd => {
+    setRegsRaw(prev => {
+      const next = typeof upd === "function" ? upd(prev) : upd;
+      save(officersRef.current, logRef.current, next);
+      return next;
+    });
+  }, [save]);
+
+  const PAGES = [
+    {id:"dashboard",  label:"Dashboard"},
+    {id:"officers",   label:"Funkcjonariusze"},
+    {id:"log",        label:"Dziennik"},
+    {id:"regulations",label:"Regulamin"},
+  ];
+
+  if (loading) return (
+    <>
+      <style>{CSS}</style>
+      <div className="loading-wrap">
+        <div className="loading-logo">LSPD</div>
+        <div className="loading-bar"><div className="loading-inner"/></div>
+        <div className="loading-text">{USE_CLOUD ? "Łączenie z bazą danych..." : "Ładowanie danych..."}</div>
+      </div>
+    </>
+  );
+
+  return (
+    <>
+      <style>{CSS}</style>
+      <SaveIndicator status={saveStatus}/>
+      {showLogin&&<LoginModal onLogin={u=>{setAdmin(u);setShowLogin(false);}} onClose={()=>setShowLogin(false)}/>}
+
+      <div className="app">
+        <header className="topbar">
+          <div className="topbar-stripe"/>
+          <div className="topbar-inner">
+            <div style={{cursor:"pointer",flexShrink:0}} onClick={()=>setPage("dashboard")}>
+              <div className="topbar-logo">LSPD</div>
+              <div className="topbar-sub">Database {USE_CLOUD?"☁":"💾"}</div>
+            </div>
+            <a className="back-btn" href="index2.html">← MENU</a>
+            <nav className="topbar-nav">
+              {PAGES.map(p=>(
+                <button key={p.id} className={`nav-btn ${page===p.id?"active":""}`} onClick={()=>setPage(p.id)}>{p.label}</button>
+              ))}
+            </nav>
+            <div className="topbar-auth">
+              <span className={`status-dot ${admin?"dot-on":"dot-off"}`}/>
+              {admin
+                ? <><span style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,color:"var(--gold)"}}>{admin.role}</span><button className="btn btn-red btn-sm" onClick={()=>setAdmin(null)}>WYLOGUJ</button></>
+                : <button className="btn btn-gold btn-sm" onClick={()=>setShowLogin(true)}>ZARZĄD LOGIN</button>}
+            </div>
+          </div>
+        </header>
+
+        <main className="main">
+          {page==="dashboard"   && <Dashboard    officers={officers} log={log}/>}
+          {page==="officers"    && <OfficersView officers={officers} setOfficers={setOfficers} isAdmin={!!admin}/>}
+          {page==="log"         && <LogView      log={log} setLog={setLog} officers={officers} isAdmin={!!admin}/>}
+          {page==="regulations" && <RegulationsView regs={regs} setRegs={setRegs} isAdmin={!!admin}/>}
+        </main>
+
+        <footer style={{borderTop:"1px solid var(--border)",padding:"16px 24px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+          <div style={{fontFamily:"'Oswald',sans-serif",fontSize:16,fontWeight:700,letterSpacing:4,color:"var(--gold)"}}>LSPD</div>
+          <div style={{fontFamily:"'Share Tech Mono',monospace",fontSize:10,color:"var(--dim)"}}>
+            {USE_CLOUD?"☁ JSONBin Cloud Sync":"💾 Local Storage"} · DATABASE v3.0
+          </div>
+        </footer>
+      </div>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
