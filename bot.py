@@ -367,6 +367,75 @@ async def update_status():
         name=f"{count} funkcjonariuszy LSPD"
     ))
 
+# ─── SZABLONY CENTRALI ────────────────────────────────────────────────────────
+CENTRALA_CATEGORY_ID = 1473743014076874904
+
+CENTRALA_TEMPLATES = {
+    "centrala": (
+        "📢 **WEZWANIE DO BIURA!**\n\n"
+        "**Kto wzywa:**\n"
+        "**Kogo:**\n"
+        "**Powód:**"
+    ),
+    "akta": (
+        "📁 **SZABLON AKTA**\n\n"
+        "**Funkcjonariusz:**\n"
+        "**Stopień:**\n"
+        "**Odznaka:**\n"
+        "**Nick OOC:**\n"
+        "**Data wpisu:**\n"
+        "**Treść:**\n"
+        "**Wystawił:**"
+    ),
+    "awanse": (
+        "⬆️ **SZABLON AWANSU**\n\n"
+        "**Kto nadaje:**\n"
+        "**Kto otrzymuje:**\n"
+        "**Stary stopień:**\n"
+        "**Nowy stopień:**\n"
+        "**Powód:**"
+    ),
+    "degradacje": (
+        "⬇️ **SZABLON DEGRADACJI**\n\n"
+        "**Kto nadaje:**\n"
+        "**Kto otrzymuje:**\n"
+        "**Stary stopień:**\n"
+        "**Nowy stopień:**\n"
+        "**Powód:**"
+    ),
+    "zwolnienia": (
+        "🔴 **SZABLON ZWOLNIENIA**\n\n"
+        "**Kto zwalnia:**\n"
+        "**Kto zostaje zwolniony:**\n"
+        "**Stopień:**\n"
+        "**Powód:**\n"
+        "**Data:**"
+    ),
+    "zawieszenia": (
+        "⏸️ **SZABLON ZAWIESZENIA**\n\n"
+        "**Kto zawiesza:**\n"
+        "**Kto zostaje zawieszony:**\n"
+        "**Stopień:**\n"
+        "**Powód:**\n"
+        "**Okres zawieszenia:**\n"
+        "**Data:**"
+    ),
+    "urlopy": (
+        "🏖️ **SZABLON URLOPU**\n\n"
+        "**Funkcjonariusz:**\n"
+        "**Stopień:**\n"
+        "**Powód:**\n"
+        "**Okres urlopu (od — do):**"
+    ),
+    "wypowiedzenia": (
+        "🚪 **SZABLON WYPOWIEDZENIA**\n\n"
+        "**Funkcjonariusz:**\n"
+        "**Stopień:**\n"
+        "**Powód rezygnacji:**\n"
+        "**Data:**"
+    ),
+}
+
 # ─── COG Z KOMENDAMI ──────────────────────────────────────────────────────────
 class LSPDCog(commands.Cog):
     def __init__(self, bot):
@@ -384,6 +453,48 @@ class LSPDCog(commands.Cog):
             await ch.send(embed=embed)
         except Exception as e:
             log.error(f"Log channel send error: {e}")
+
+    @slash_command(name="centrala-setup", description="Wysyła szablony na wszystkie kanały kategorii Centrala", guild_ids=[GUILD_ID])
+    async def cmd_centrala_setup(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        category = interaction.guild.get_channel(CENTRALA_CATEGORY_ID)
+        if not category or not isinstance(category, nextcord.CategoryChannel):
+            await interaction.followup.send("❌ Nie znaleziono kategorii Centrala.", ephemeral=True)
+            return
+
+        sent = []
+        skipped = []
+
+        for channel in category.text_channels:
+            # Dopasuj po nazwie kanału (ignoruj emoji i spacje na początku)
+            raw_name = channel.name.lower().strip()
+            # Usuń prefix emoji jeśli jest (np. "📋-centrala" → "centrala")
+            clean_name = raw_name.lstrip("📋📁⬆️⬇️🔴⏸️🏖️🚪-| ").strip()
+
+            template = None
+            for key in CENTRALA_TEMPLATES:
+                if key in clean_name or clean_name in key:
+                    template = CENTRALA_TEMPLATES[key]
+                    break
+
+            if not template:
+                skipped.append(channel.name)
+                continue
+
+            try:
+                await channel.send(template)
+                sent.append(channel.name)
+            except nextcord.Forbidden:
+                skipped.append(f"{channel.name} (brak uprawnień)")
+
+        result = f"✅ Wysłano szablony na **{len(sent)}** kanałów: {', '.join(sent) or '—'}"
+        if skipped:
+            result += f"\n⚠️ Pominięto: {', '.join(skipped)}"
+        await interaction.followup.send(result, ephemeral=True)
 
     @slash_command(name="sync", description="Ręczna synchronizacja ról i pseudonimów LSPD", guild_ids=[GUILD_ID])
     async def cmd_sync(self, interaction: Interaction):
