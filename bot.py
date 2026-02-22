@@ -152,55 +152,74 @@ KONSEKWENCJA_EMOJI = {
 }
 
 async def check_new_akta(guild: nextcord.Guild):
-    """Sprawdź czy pojawiły się nowe akta IAD i wyślij je na kanał Discord."""
+    """Sprawdź czy pojawiły się nowe akta IAD i wyślij je na kanał Discord z pingiem."""
     global _known_akta_ids, _akta_initialized
 
     record = await fetch_full_record()
-    iad = record.get("iad", {})
-    akta = iad.get("akta", [])
+    iad    = record.get("iad", {})
+    akta   = iad.get("akta", [])
 
     current_ids = {str(a.get("id")) for a in akta}
 
     if not _akta_initialized:
-        # Pierwsze uruchomienie — zapamiętaj istniejące, nic nie wysyłaj
-        _known_akta_ids = current_ids
+        _known_akta_ids  = current_ids
         _akta_initialized = True
         log.info(f"[IAD] Zapamiętano {len(_known_akta_ids)} istniejących akt.")
         return
 
     new_akta = [a for a in akta if str(a.get("id")) not in _known_akta_ids]
-
     if not new_akta:
         return
 
     ch = guild.get_channel(IAD_AKTA_CHANNEL_ID)
     if not ch:
-        log.warning(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID} nie znaleziony.")
+        log.warning(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID} nie znaleziony na serwerze.")
         return
+
+    # Zbuduj mapę: imię IC → member Discord (przez nick OOC z bazy officers)
+    officers = record.get("officers", [])
+    # name (IC) → nick (OOC Discord)
+    name_to_nick = {
+        (o.get("name") or "").strip(): (o.get("nick") or "").strip().lower()
+        for o in officers if o.get("name")
+    }
+    # nick OOC → Member obiektu Discord
+    nick_to_member = {
+        m.name.lower(): m
+        for m in guild.members if not m.bot
+    }
 
     for akta_entry in new_akta:
         konsekwencja = akta_entry.get("konsekwencja", "MINUS")
-        czas = akta_entry.get("zawieszenieCzas", "")
-        kons_label = konsekwencja + (f" — {czas}" if konsekwencja == "ZAWIESZENIE" and czas else "")
-        color = KONSEKWENCJA_COLOR.get(konsekwencja, 0x888888)
-        emoji = KONSEKWENCJA_EMOJI.get(konsekwencja, "📁")
+        czas         = akta_entry.get("zawieszenieCzas", "")
+        kons_label   = konsekwencja + (f" — {czas}" if konsekwencja == "ZAWIESZENIE" and czas else "")
+        color        = KONSEKWENCJA_COLOR.get(konsekwencja, 0x888888)
+        emoji        = KONSEKWENCJA_EMOJI.get(konsekwencja, "📁")
+        imie         = (akta_entry.get("imieNazwisko") or "").strip()
+
+        # Znajdź member Discorda po imieniu IC → nicku OOC
+        ooc_nick = name_to_nick.get(imie, "")
+        member   = nick_to_member.get(ooc_nick) if ooc_nick else None
+        ping_str = member.mention if member else None
 
         embed = nextcord.Embed(
-            title=f"{emoji} NOWA AKTE IAD — {kons_label}",
+            title=f"{emoji} NOWY WPIS W AKTACH IAD — {kons_label}",
             color=color,
             timestamp=datetime.utcnow()
         )
-        embed.add_field(name="👤 Funkcjonariusz", value=akta_entry.get("imieNazwisko") or "—", inline=True)
-        embed.add_field(name="⚖️ Konsekwencja",  value=kons_label,                              inline=True)
-        embed.add_field(name="\u200b",            value="\u200b",                                inline=True)
-        embed.add_field(name="📋 Powód",          value=akta_entry.get("powod") or "—",         inline=False)
-        embed.add_field(name="✍️ Podpisał",       value=akta_entry.get("podpisal") or "—",      inline=True)
-        embed.add_field(name="📅 Data",           value=akta_entry.get("data") or "—",          inline=True)
+        embed.add_field(name="👤 Funkcjonariusz", value=imie or "—",                          inline=True)
+        embed.add_field(name="⚖️ Konsekwencja",  value=kons_label,                            inline=True)
+        embed.add_field(name="\u200b",            value="\u200b",                              inline=True)
+        embed.add_field(name="📋 Powód",          value=akta_entry.get("powod") or "—",       inline=False)
+        embed.add_field(name="✍️ Podpisał",       value=akta_entry.get("podpisal") or "—",    inline=True)
+        embed.add_field(name="📅 Data",           value=akta_entry.get("data") or "—",        inline=True)
         embed.set_footer(text="LSPD IAD — System Akt")
 
         try:
-            await ch.send(embed=embed)
-            log.info(f"[IAD] Wysłano akte: {akta_entry.get('imieNazwisko')} / {kons_label}")
+            # Wyślij ping jako osobna wiadomość (żeby rzeczywiście pingowała), potem embed
+            content = ping_str if ping_str else None
+            await ch.send(content=content, embed=embed)
+            log.info(f"[IAD] Wysłano akte: {imie} / {kons_label} | ping: {ping_str or 'brak'}")
         except Exception as e:
             log.error(f"[IAD] Błąd wysyłania akty: {e}")
 
@@ -1004,6 +1023,10 @@ async def on_ready():
     bot.add_view(CloseTicketView())
     if not auto_sync.is_running():
         auto_sync.start()
+    # Zainicjalizuj znane akta IAD żeby nie spamować przy starcie
+    guild = bot.get_guild(GUILD_ID)
+    if guild:
+        await check_new_akta(guild)
     await update_status()
 
 # ─── START ────────────────────────────────────────────────────────────────────
