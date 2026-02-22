@@ -548,7 +548,38 @@ class LSPDCog(commands.Cog):
             await interaction.followup.send("✅ Wszystkie osoby z rolami stopni są w bazie.", ephemeral=True)
             await self._log(interaction.guild, "⚠️ /helper", f"**Wykonał:** {interaction.user.mention}\n✅ Wszyscy z rolami stopni są w bazie.", 0x2ecc71)
 
-    @slash_command(name="przypomnienie", description="Sprawdź i przypomnij członkom o brakujących danych w bazie LSPD", guild_ids=[GUILD_ID])
+    @slash_command(name="ticket-setup", description="Wysyła panel ticketów na kanał", guild_ids=[GUILD_ID])
+    async def cmd_ticket_setup(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
+            return
+
+        channel = interaction.guild.get_channel(TICKET_CHANNEL_ID)
+        if not channel:
+            await interaction.response.send_message("❌ Nie znaleziono kanału ticketów.", ephemeral=True)
+            return
+
+        embed = nextcord.Embed(
+            title="🎫 SYSTEM TICKETÓW — LSPD",
+            description=(
+                "Witaj w systemie zgłoszeń Los Santos Police Department.\n\n"
+                "Wybierz rodzaj sprawy z listy poniżej, aby otworzyć prywatny ticket "
+                "z odpowiednim personelem LSPD.\n\n"
+                "**Dostępne kategorie:**\n"
+                "📋 **Raport o stopień** — nadanie stopnia w LSPD\n"
+                "👮 **Pytanie do HC** — kontakt z High Command\n"
+                "🔍 **Sprawa do IAD** — Wydział Spraw Wewnętrznych\n"
+                "📝 **Podanie na FTO** — program Field Training Officer\n\n"
+                "*Pamiętaj — otwieraj ticket tylko w uzasadnionych przypadkach.*"
+            ),
+            color=0x1e5fc4,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+        embed.set_footer(text="Los Santos Police Department · Ticket System")
+
+        await channel.send(embed=embed, view=TicketSelectView())
+        await interaction.response.send_message(f"✅ Panel ticketów wysłany na {channel.mention}.", ephemeral=True) description="Sprawdź i przypomnij członkom o brakujących danych w bazie LSPD", guild_ids=[GUILD_ID])
     async def cmd_przypomnienie(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
@@ -631,10 +662,141 @@ async def on_member_join(member: nextcord.Member):
     await channel.send(embed=embed)
     await update_status()
 
+# ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
+TICKET_CHANNEL_ID = 1474113895990952117
+
+TICKET_TYPES = {
+    "raport_stopien": {
+        "label":       "📋 Raport o stopień",
+        "description": "Złóż raport z prośbą o nadanie stopnia w LSPD.",
+        "color":       0x1e5fc4,
+        "roles":       [1367513692383608985],
+        "channel_prefix": "raport",
+    },
+    "pytanie_hc": {
+        "label":       "👮 Pytanie do HC",
+        "description": "Zadaj pytanie do High Command LSPD.",
+        "color":       0x9b59b6,
+        "roles":       [1367513692383608985],
+        "channel_prefix": "pytanie-hc",
+    },
+    "sprawa_iad": {
+        "label":       "🔍 Sprawa do IAD",
+        "description": "Zgłoś sprawę do Wydziału Spraw Wewnętrznych (IAD).",
+        "color":       0xe74c3c,
+        "roles":       [1368229314251984919, 1368227491667378288],
+        "channel_prefix": "iad",
+    },
+    "podanie_fto": {
+        "label":       "📝 Podanie na FTO",
+        "description": "Złóż podanie do programu Field Training Officer.",
+        "color":       0x2ecc71,
+        "roles":       [1368230039971303485, 1368227491667378288],
+        "channel_prefix": "fto",
+    },
+}
+
+class TicketTypeSelect(nextcord.ui.Select):
+    def __init__(self):
+        options = [
+            nextcord.SelectOption(label=v["label"], value=k, description=v["description"])
+            for k, v in TICKET_TYPES.items()
+        ]
+        super().__init__(placeholder="Wybierz rodzaj ticketu...", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: Interaction):
+        ticket_type = self.values[0]
+        cfg = TICKET_TYPES[ticket_type]
+        guild = interaction.guild
+
+        # Sprawdź czy użytkownik już ma otwarty ticket tego typu
+        existing = nextcord.utils.get(
+            guild.text_channels,
+            name=f"{cfg['channel_prefix']}-{interaction.user.name.lower().replace(' ', '-')}"
+        )
+        if existing:
+            await interaction.response.send_message(
+                f"❌ Masz już otwarty ticket tego typu: {existing.mention}", ephemeral=True
+            )
+            return
+
+        # Uprawnienia kanału
+        overwrites = {
+            guild.default_role: nextcord.PermissionOverwrite(read_messages=False),
+            interaction.user:   nextcord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.me:           nextcord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+        }
+        for role_id in cfg["roles"]:
+            role = guild.get_role(role_id)
+            if role:
+                overwrites[role] = nextcord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+        # Kategoria — ta sama co kanał ticketów
+        ticket_ch = guild.get_channel(TICKET_CHANNEL_ID)
+        category = ticket_ch.category if ticket_ch else None
+
+        channel_name = f"{cfg['channel_prefix']}-{interaction.user.name.lower().replace(' ', '-')}"
+        ticket_channel = await guild.create_text_channel(
+            name=channel_name,
+            overwrites=overwrites,
+            category=category,
+            reason=f"Ticket: {cfg['label']} — {interaction.user}"
+        )
+
+        # Embed powitalny w tickecie
+        embed = nextcord.Embed(
+            title=cfg["label"],
+            description=(
+                f"Witaj {interaction.user.mention}!\n\n"
+                f"{cfg['description']}\n\n"
+                f"Opisz swoją sprawę jak najdokładniej. "
+                f"Odpowiedni personel zajmie się Twoim zgłoszeniem wkrótce.\n\n"
+                f"Aby zamknąć ticket użyj przycisku poniżej."
+            ),
+            color=cfg["color"],
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=guild.me.display_avatar.url)
+        embed.set_footer(text="LSPD Ticket System")
+
+        roles_mentions = " ".join(
+            f"<@&{r}>" for r in cfg["roles"]
+        )
+
+        view = CloseTicketView()
+        await ticket_channel.send(content=roles_mentions, embed=embed, view=view)
+        await interaction.response.send_message(
+            f"✅ Twój ticket został utworzony: {ticket_channel.mention}", ephemeral=True
+        )
+
+class TicketSelectView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketTypeSelect())
+
+class CloseTicketView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @nextcord.ui.button(label="🔒 Zamknij ticket", style=nextcord.ButtonStyle.red, custom_id="close_ticket")
+    async def close_ticket(self, button: nextcord.ui.Button, interaction: Interaction):
+        embed = nextcord.Embed(
+            title="🔒 Ticket zamknięty",
+            description=f"Ticket zamknięty przez {interaction.user.mention}.\nKanał zostanie usunięty za 5 sekund.",
+            color=0xe74c3c,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+        await asyncio.sleep(5)
+        await interaction.channel.delete(reason=f"Ticket zamknięty przez {interaction.user}")
+
 # ─── ON READY ─────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     log.info(f"✅ Bot online: {bot.user} | Serwer: {GUILD_ID} | Sync co {SYNC_INTERVAL_MIN} min")
+    bot.add_view(TicketSelectView())
+    bot.add_view(CloseTicketView())
     if not auto_sync.is_running():
         auto_sync.start()
     await update_status()
