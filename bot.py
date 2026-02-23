@@ -8,12 +8,12 @@ import logging
 from datetime import datetime
 
 # ─── KONFIGURACJA ─────────────────────────────────────────────────────────────
-DISCORD_TOKEN     = os.getenv("DISCORD_TOKEN")
-GUILD_ID          = int(os.getenv("GUILD_ID", "0"))
-JSONBIN_BIN_ID    = os.getenv("JSONBIN_BIN_ID")
-JSONBIN_API_KEY   = os.getenv("JSONBIN_API_KEY")
-SYNC_INTERVAL_MIN = int(os.getenv("SYNC_INTERVAL", "5"))
-LOG_CHANNEL_ID    = 1474443852784992418
+DISCORD_TOKEN       = os.getenv("DISCORD_TOKEN")
+GUILD_ID            = int(os.getenv("GUILD_ID", "0"))
+SUPABASE_URL        = os.getenv("SUPABASE_URL", "https://gmxooidsxoqifdycqwfd.supabase.co")
+SUPABASE_KEY        = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdteG9vaWRzeG9xaWZkeWNxd2ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE4NjIxODIsImV4cCI6MjA4NzQzODE4Mn0.PhEvMKDx-dA-kmcgTvsXs4lSSRP4VDkaeh1Jf739iHs")
+SYNC_INTERVAL_MIN   = int(os.getenv("SYNC_INTERVAL", "5"))
+LOG_CHANNEL_ID      = 1474443852784992418
 IAD_AKTA_CHANNEL_ID = 1473743212966318140
 
 # ─── MAPOWANIE STOPIEŃ → ROLA ─────────────────────────────────────────────────
@@ -32,7 +32,7 @@ RANK_TO_ROLE = {
     "Officer III":      "Officer III",
     "Officer II":       "Officer II",
     "Officer I":        "Officer I",
-    "Cadet":             "Cadet",
+    "Cadet":            "Cadet",
 }
 ALL_LSPD_ROLES = set(RANK_TO_ROLE.values())
 
@@ -52,10 +52,10 @@ UNIT_TO_ROLE = {
 ALL_UNIT_ROLES = set(UNIT_TO_ROLE.values())
 
 # ─── ROLE STATUSÓW ────────────────────────────────────────────────────────────
-STATUS_SUSPENDED   = "ZAWIESZONY"
-STATUS_RED_ENTRY   = "CZERWONY WPIS"
+STATUS_SUSPENDED    = "ZAWIESZONY"
+STATUS_RED_ENTRY    = "CZERWONY WPIS"
 STATUS_YELLOW_ENTRY = "ŻÓŁTY WPIS"
-ALL_STATUS_ROLES   = {STATUS_SUSPENDED, STATUS_RED_ENTRY, STATUS_YELLOW_ENTRY}
+ALL_STATUS_ROLES    = {STATUS_SUSPENDED, STATUS_RED_ENTRY, STATUS_YELLOW_ENTRY}
 
 # ─── PRZEDZIAŁY ODZNAK ───────────────────────────────────────────────────────
 RANK_BADGE_RANGES = {
@@ -77,13 +77,12 @@ RANK_BADGE_RANGES = {
 }
 
 def assign_badge(rank: str, officers: list) -> str:
-    """Zwraca najniższą wolną odznakę w przedziale dla danego stopnia, z wiodącymi zerami."""
     rng = RANK_BADGE_RANGES.get(rank)
     if not rng:
         return ""
     lo, hi = rng
     used = {int(o["badge"]) for o in officers if str(o.get("badge", "")).isdigit()}
-    digits = len(str(hi))  # liczba cyfr wyznaczona przez maksimum przedziału
+    digits = len(str(hi))
     for b in range(lo, hi + 1):
         if b not in used:
             return str(b).zfill(digits)
@@ -103,36 +102,65 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ─── JSONBIN ──────────────────────────────────────────────────────────────────
+# ─── SUPABASE — WARSTWA DANYCH ────────────────────────────────────────────────
+def _sb_headers() -> dict:
+    return {
+        "apikey":        SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=representation",
+    }
+
 async def fetch_officers() -> list:
-    url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest"
-    headers = {"X-Master-Key": JSONBIN_API_KEY}
+    """
+    Pobiera listę oficerów z Supabase.
+    Tabela: officers
+    Kolumny: id, nick, name, badge, rank, swat, iad, ftd, fac, seu, sv, nt, pwc, wu, k9,
+             suspended, redEntry, yellowEntry, onLeave, commandBureau
+    """
+    url = f"{SUPABASE_URL}/rest/v1/officers?select=*"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, headers=_sb_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
-                    log.error(f"JSONBin HTTP {resp.status}")
+                    log.error(f"[Supabase] fetch_officers HTTP {resp.status}: {await resp.text()}")
                     return []
-                data = await resp.json()
-                return data.get("record", {}).get("officers", [])
+                return await resp.json()
     except Exception as e:
-        log.error(f"JSONBin error: {e}")
+        log.error(f"[Supabase] fetch_officers error: {e}")
         return []
 
-async def fetch_full_record() -> dict:
-    """Pobierz pełny rekord JSONBin (officers, log, regs, ftd, iad)."""
-    url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest"
-    headers = {"X-Master-Key": JSONBIN_API_KEY}
+async def update_officer(officer_id, data: dict) -> bool:
+    """Aktualizuje pojedynczego oficera po id."""
+    url = f"{SUPABASE_URL}/rest/v1/officers?id=eq.{officer_id}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    return {}
-                data = await resp.json()
-                return data.get("record", {})
+            async with session.patch(url, headers=_sb_headers(), json=data, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                ok = resp.status in (200, 204)
+                if not ok:
+                    log.error(f"[Supabase] update_officer HTTP {resp.status}: {await resp.text()}")
+                return ok
     except Exception as e:
-        log.error(f"JSONBin fetch_full error: {e}")
-        return {}
+        log.error(f"[Supabase] update_officer error: {e}")
+        return False
+
+async def fetch_iad_akta() -> list:
+    """
+    Pobiera akta IAD z Supabase.
+    Tabela: iad_akta
+    Kolumny: id, imieNazwisko, konsekwencja, zawieszenieCzas, powod, podpisal, data
+    """
+    url = f"{SUPABASE_URL}/rest/v1/iad_akta?select=*&order=id.desc"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=_sb_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    log.error(f"[Supabase] fetch_iad_akta HTTP {resp.status}: {await resp.text()}")
+                    return []
+                return await resp.json()
+    except Exception as e:
+        log.error(f"[Supabase] fetch_iad_akta error: {e}")
+        return []
 
 # ─── WATCHER AKAT IAD → DISCORD ───────────────────────────────────────────────
 _known_akta_ids: set = set()
@@ -141,7 +169,7 @@ _akta_initialized: bool = False
 KONSEKWENCJA_COLOR = {
     "PLUS":        0x2ecc71,
     "MINUS":       0xe74c3c,
-    "ZAWIESZENIE":0xf1c40f,
+    "ZAWIESZENIE": 0xf1c40f,
     "ZWOLNIENIE":  0xff0000,
 }
 KONSEKWENCJA_EMOJI = {
@@ -152,53 +180,40 @@ KONSEKWENCJA_EMOJI = {
 }
 
 async def check_new_akta(guild: nextcord.Guild):
-    """Sprawdź czy pojawiły się nowe akta IAD i wyślij je na kanał Discord z pingiem."""
     global _known_akta_ids, _akta_initialized
 
     log.info(f"[IAD] check_new_akta start — guild: {guild.id}")
 
-    record = await fetch_full_record()
-    if not record:
-        log.warning("[IAD] fetch_full_record zwrócił pusty rekord!")
-        return
-
-    iad    = record.get("iad", {})
-    akta   = iad.get("akta", [])
-    log.info(f"[IAD] Znaleziono {len(akta)} akt w JSONBin")
+    akta = await fetch_iad_akta()
+    if not akta and not _akta_initialized:
+        log.warning("[IAD] fetch_iad_akta zwrócił pustą listę!")
 
     current_ids = {str(a.get("id")) for a in akta}
 
     if not _akta_initialized:
         _known_akta_ids  = current_ids
         _akta_initialized = True
-        log.info(f"[IAD] Inicjalizacja — zapamiętano {len(_known_akta_ids)} istniejących akt: {_known_akta_ids}")
+        log.info(f"[IAD] Inicjalizacja — zapamiętano {len(_known_akta_ids)} istniejących akt")
         return
 
     new_akta = [a for a in akta if str(a.get("id")) not in _known_akta_ids]
-    log.info(f"[IAD] Nowe akta: {len(new_akta)} | znane IDs: {_known_akta_ids} | current IDs: {current_ids}")
+    log.info(f"[IAD] Nowe akta: {len(new_akta)}")
 
     if not new_akta:
         return
 
     ch = guild.get_channel(IAD_AKTA_CHANNEL_ID)
-    log.info(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID}: {ch}")
     if not ch:
-        log.error(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID} NIE ZNALEZIONY — sprawdź czy bot ma dostęp do kanału!")
-        # Wypisz wszystkie dostępne kanały tekstowe
-        text_channels = [f"{c.name}({c.id})" for c in guild.text_channels]
-        log.info(f"[IAD] Dostępne kanały: {text_channels[:20]}")
+        log.error(f"[IAD] Kanał {IAD_AKTA_CHANNEL_ID} nie znaleziony!")
         return
 
-    # Zbuduj mapę: imię IC → member Discord (przez nick OOC z bazy officers)
-    officers = record.get("officers", [])
+    # Mapa imię IC → member Discord
+    officers = await fetch_officers()
     name_to_nick = {
         (o.get("name") or "").strip(): (o.get("nick") or "").strip().lower()
         for o in officers if o.get("name")
     }
-    nick_to_member = {
-        m.name.lower(): m
-        for m in guild.members if not m.bot
-    }
+    nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
 
     for akta_entry in new_akta:
         konsekwencja = akta_entry.get("konsekwencja", "MINUS")
@@ -211,49 +226,30 @@ async def check_new_akta(guild: nextcord.Guild):
         ooc_nick = name_to_nick.get(imie, "")
         member   = nick_to_member.get(ooc_nick) if ooc_nick else None
         ping_str = member.mention if member else None
-        log.info(f"[IAD] Akta dla: '{imie}' → OOC nick: '{ooc_nick}' → member: {member} → ping: {ping_str}")
+        log.info(f"[IAD] Akta dla: '{imie}' → OOC nick: '{ooc_nick}' → ping: {ping_str}")
 
         embed = nextcord.Embed(
             title=f"{emoji} NOWY WPIS W AKTACH IAD — {kons_label}",
             color=color,
             timestamp=datetime.utcnow()
         )
-        embed.add_field(name="👤 Funkcjonariusz", value=imie or "—",                        inline=True)
-        embed.add_field(name="⚖️ Konsekwencja",  value=kons_label,                          inline=True)
-        embed.add_field(name="\u200b",            value="\u200b",                            inline=True)
-        embed.add_field(name="📋 Powód",          value=akta_entry.get("powod") or "—",     inline=False)
-        embed.add_field(name="✍️ Podpisał",       value=akta_entry.get("podpisal") or "—",  inline=True)
-        embed.add_field(name="📅 Data",           value=akta_entry.get("data") or "—",      inline=True)
+        embed.add_field(name="👤 Funkcjonariusz", value=imie or "—",                       inline=True)
+        embed.add_field(name="⚖️ Konsekwencja",  value=kons_label,                         inline=True)
+        embed.add_field(name="\u200b",            value="\u200b",                           inline=True)
+        embed.add_field(name="📋 Powód",          value=akta_entry.get("powod") or "—",    inline=False)
+        embed.add_field(name="✍️ Podpisał",       value=akta_entry.get("podpisal") or "—", inline=True)
+        embed.add_field(name="📅 Data",           value=akta_entry.get("data") or "—",     inline=True)
         embed.set_footer(text="LSPD IAD — System Akt")
 
         try:
-            content = ping_str  # None jeśli nie znaleziono — Discord sam to obsłuży
-            await ch.send(content=content, embed=embed)
-            log.info(f"[IAD] ✅ Wysłano akte: {imie} / {kons_label} | ping: {ping_str or 'brak'}")
+            await ch.send(content=ping_str, embed=embed)
+            log.info(f"[IAD] ✅ Wysłano akte: {imie} / {kons_label}")
         except nextcord.Forbidden:
             log.error(f"[IAD] ❌ Brak uprawnień do wysłania na kanał {IAD_AKTA_CHANNEL_ID}!")
         except Exception as e:
             log.error(f"[IAD] ❌ Błąd wysyłania akty: {e}")
 
     _known_akta_ids = current_ids
-
-# ─── ZAPIS DO JSONBIN ────────────────────────────────────────────────────────
-async def save_officers(officers: list) -> bool:
-    url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
-    headers = {"X-Master-Key": JSONBIN_API_KEY, "Content-Type": "application/json"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Pobierz aktualne dane (log, regs) żeby nie nadpisać
-            async with session.get(url + "/latest", headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status != 200:
-                    return False
-                data = (await r.json()).get("record", {})
-            data["officers"] = officers
-            async with session.put(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                return r.status == 200
-    except Exception as e:
-        log.error(f"JSONBin save error: {e}")
-        return False
 
 # ─── BUDOWANIE PSEUDONIMU ─────────────────────────────────────────────────────
 def build_nickname(officer: dict) -> str:
@@ -263,19 +259,16 @@ def build_nickname(officer: dict) -> str:
         return f"[{badge}] {name}"
     return name or ""
 
+def officer_map_from(officers: list) -> dict:
+    return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
+
 # ─── SYNC LOGIC ───────────────────────────────────────────────────────────────
 async def sync_roles(guild: nextcord.Guild) -> dict:
     officers = await fetch_officers()
     if not officers:
-        return {"error": "Nie udało się pobrać danych z bazy"}
+        return {"error": "Nie udało się pobrać danych z Supabase"}
 
-    # Mapa: nick OOC (nazwa konta Discord) → dane oficera
-    officer_map = {}
-    for o in officers:
-        nick = (o.get("nick") or "").strip().lower()
-        if nick:
-            officer_map[nick] = o
-
+    officer_map = officer_map_from(officers)
     results = {"updated": [], "skipped": [], "not_found": [], "errors": []}
     guild_roles = {r.name: r for r in guild.roles}
 
@@ -283,20 +276,18 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         if member.bot:
             continue
 
-        # Dopasowanie WYŁĄCZNIE po nazwie konta Discord (member.name)
         officer = officer_map.get(member.name.lower())
-
         if not officer:
             results["not_found"].append(member.name)
             continue
 
-        rank = officer.get("rank", "")
+        rank            = officer.get("rank", "")
         target_role_name = RANK_TO_ROLE.get(rank)
-        target_role = guild_roles.get(target_role_name) if target_role_name else None
+        target_role      = guild_roles.get(target_role_name) if target_role_name else None
         if target_role_name and not target_role:
             results["errors"].append(f"Brak roli '{target_role_name}' na serwerze")
 
-        # ── Jednostki (SWAT/IAD/FTD) ──────────────────────────────────────
+        # ── Jednostki ─────────────────────────────────────────────────────────
         target_unit_roles = set()
         for field, role_name in UNIT_TO_ROLE.items():
             if officer.get(field):
@@ -306,62 +297,55 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                 else:
                     results["errors"].append(f"Brak roli '{role_name}' na serwerze")
 
-        # ── Odznaka — zmień jeśli nie pasuje do przedziału stopnia ──────
+        # ── Odznaka ───────────────────────────────────────────────────────────
         current_badge = str(officer.get("badge") or "").strip()
         badge_changed = False
-        new_badge = current_badge
+        new_badge     = current_badge
         if rank in RANK_BADGE_RANGES:
-            lo, hi = RANK_BADGE_RANGES[rank]
+            lo, hi    = RANK_BADGE_RANGES[rank]
             badge_num = int(current_badge) if current_badge.isdigit() else -1
             if badge_num < lo or badge_num > hi:
-                # Odznaka nie pasuje do przedziału — przydziel nową
                 new_badge = assign_badge(rank, officers)
                 if new_badge and new_badge != current_badge:
                     badge_changed = True
 
-        # ── Pseudonim ──────────────────────────────────────────────────────
-        # Użyj nowej odznaki do budowania pseudonimu jeśli się zmieniła
+        # ── Pseudonim ─────────────────────────────────────────────────────────
         display_officer = {**officer, "badge": new_badge} if badge_changed else officer
         target_nick  = build_nickname(display_officer)
         nick_changed = bool(target_nick) and member.display_name != target_nick
 
-        # ── Sprawdź role stopnia ───────────────────────────────────────────
+        # ── Role stopnia ──────────────────────────────────────────────────────
         current_lspd   = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
         has_target     = any(r.name == target_role_name for r in member.roles) if target_role_name else True
         rank_to_remove = [r for r in current_lspd if r.name != target_role_name]
         rank_ok        = has_target and len(rank_to_remove) == 0
 
-        # ── Sprawdź role jednostek ─────────────────────────────────────────
+        # ── Role jednostek ────────────────────────────────────────────────────
         current_unit_roles = {r for r in member.roles if r.name in ALL_UNIT_ROLES}
         units_to_add    = target_unit_roles - current_unit_roles
         units_to_remove = current_unit_roles - target_unit_roles
         units_ok        = not units_to_add and not units_to_remove
 
-        # ── Statusy (zawieszony, wpisy) ────────────────────────────────────
+        # ── Statusy ───────────────────────────────────────────────────────────
         target_status_roles = set()
         if officer.get("suspended"):
             r = guild_roles.get(STATUS_SUSPENDED)
-            if r:
-                target_status_roles.add(r)
+            if r: target_status_roles.add(r)
         if officer.get("redEntry"):
             r = guild_roles.get(STATUS_RED_ENTRY)
-            if r:
-                target_status_roles.add(r)
+            if r: target_status_roles.add(r)
         if officer.get("yellowEntry"):
             r = guild_roles.get(STATUS_YELLOW_ENTRY)
-            if r:
-                target_status_roles.add(r)
+            if r: target_status_roles.add(r)
 
         current_status_roles = {r for r in member.roles if r.name in ALL_STATUS_ROLES}
         status_to_add    = target_status_roles - current_status_roles
         status_to_remove = current_status_roles - target_status_roles
         status_ok        = not status_to_add and not status_to_remove
 
-        # ── Command Bureau ─────────────────────────────────────────────────
-        has_cb = any(r.name == "Command Bureau" for r in member.roles)
+        # ── Command Bureau ────────────────────────────────────────────────────
+        has_cb    = any(r.name == "Command Bureau" for r in member.roles)
         cb_changed = bool(officer.get("commandBureau")) != has_cb
-        if cb_changed:
-            officer["commandBureau"] = has_cb
 
         if rank_ok and units_ok and status_ok and not nick_changed and not badge_changed and not cb_changed:
             results["skipped"].append(member.name)
@@ -369,21 +353,18 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
 
         changes = []
         try:
-            # Aktualizuj odznakę w bazie jeśli się zmieniła
             if badge_changed:
-                # Zaktualizuj w liście officers od razu (żeby kolejne assign_badge w tej samej pętli widziały zajętą odznakę)
                 officer["badge"] = new_badge
+                await update_officer(officer["id"], {"badge": new_badge})
                 changes.append(f"odznaka→#{new_badge}")
 
-            # Aktualizuj stopień
             if not rank_ok:
                 if rank_to_remove:
                     await member.remove_roles(*rank_to_remove, reason="LSPD Bot sync")
-                if not has_target:
+                if not has_target and target_role:
                     await member.add_roles(target_role, reason="LSPD Bot sync")
                 changes.append(f"stopień→{target_role_name}")
 
-            # Aktualizuj jednostki
             if not units_ok:
                 if units_to_remove:
                     await member.remove_roles(*units_to_remove, reason="LSPD Bot sync")
@@ -394,7 +375,6 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                 if units_to_remove:
                     changes.append(f"-{','.join(r.name for r in units_to_remove)}")
 
-            # Aktualizuj statusy
             if not status_ok:
                 if status_to_remove:
                     await member.remove_roles(*status_to_remove, reason="LSPD Bot sync")
@@ -405,12 +385,12 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                 if status_to_remove:
                     changes.append(f"-{','.join(r.name for r in status_to_remove)}")
 
-            # Aktualizuj pseudonim
             if nick_changed:
                 await member.edit(nick=target_nick, reason="LSPD Bot sync")
                 changes.append(f"nick→{target_nick}")
 
             if cb_changed:
+                await update_officer(officer["id"], {"commandBureau": has_cb})
                 changes.append(f"commandBureau→{has_cb}")
 
             summary = f"{member.name} ({', '.join(changes)})"
@@ -421,10 +401,6 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
             results["errors"].append(f"Brak uprawnień: {member.name}")
         except Exception as e:
             results["errors"].append(f"{member.name}: {e}")
-
-    # Zapisz do JSONBin jeśli cokolwiek się zmieniło
-    if any("odznaka" in u or "commandBureau" in u for u in results.get("updated", [])):
-        await save_officers(officers)
 
     return results
 
@@ -460,7 +436,6 @@ async def auto_sync():
     if not guild:
         return
     t = asyncio.get_event_loop().time()
-
     results = await sync_roles(guild)
     duration = asyncio.get_event_loop().time() - t
     upd = len(results.get("updated", []))
@@ -470,14 +445,12 @@ async def auto_sync():
         if ch:
             for e in build_embeds(results, duration):
                 await ch.send(embed=e)
-
     await update_status()
 
 @auto_sync.before_loop
 async def before_auto_sync():
     await bot.wait_until_ready()
 
-# ── Osobny task sprawdzający akta IAD co minutę (szybka reakcja) ──────────────
 @tasks.loop(minutes=1)
 async def iad_akta_watch():
     guild = bot.get_guild(GUILD_ID)
@@ -597,13 +570,11 @@ class LSPDCog(commands.Cog):
             await interaction.followup.send("❌ Nie znaleziono kategorii Centrala.", ephemeral=True)
             return
 
-        sent = []
+        sent    = []
         skipped = []
 
         for channel in category.text_channels:
-            # Dopasuj po nazwie kanału (ignoruj emoji i spacje na początku)
-            raw_name = channel.name.lower().strip()
-            # Usuń prefix emoji jeśli jest (np. "📋-centrala" → "centrala")
+            raw_name   = channel.name.lower().strip()
             clean_name = raw_name.lstrip("📋📁⬆️⬇️🔴⏸️🏖️🚪-| ").strip()
 
             template = None
@@ -642,9 +613,9 @@ class LSPDCog(commands.Cog):
             return
         for embed in build_embeds(results, duration):
             await interaction.followup.send(embed=embed)
-        upd = len(results.get("updated", []))
+        upd  = len(results.get("updated", []))
         skip = len(results.get("skipped", []))
-        nf = len(results.get("not_found", []))
+        nf   = len(results.get("not_found", []))
         await self._log(interaction.guild, "🔄 /sync", f"**Wykonał:** {interaction.user.mention}\n✅ Zaktualizowano: **{upd}** | ⏭️ Bez zmian: **{skip}** | ❓ Nie znaleziono: **{nf}** | ⏱️ {duration:.1f}s", 0x2ecc71)
 
     @slash_command(name="status", description="Status bota LSPD", guild_ids=[GUILD_ID])
@@ -652,7 +623,7 @@ class LSPDCog(commands.Cog):
         await interaction.response.defer()
         officers = await fetch_officers()
         embed = nextcord.Embed(title="🤖 LSPD Bot — Status", color=nextcord.Color.blue())
-        embed.add_field(name="📡 Baza danych", value=f"{'✅ OK' if officers else '❌ Błąd'} ({len(officers)} FP)", inline=False)
+        embed.add_field(name="📡 Baza danych", value=f"{'✅ Supabase OK' if officers else '❌ Błąd Supabase'} ({len(officers)} FP)", inline=False)
         embed.add_field(name="🔄 Auto-sync",   value=f"Co {SYNC_INTERVAL_MIN} min", inline=True)
         embed.add_field(name="👥 Członków",    value=str(interaction.guild.member_count), inline=True)
         await interaction.followup.send(embed=embed)
@@ -662,7 +633,6 @@ class LSPDCog(commands.Cog):
     async def cmd_kto(self, interaction: Interaction, member: nextcord.Member):
         await interaction.response.defer()
         officers = await fetch_officers()
-        # /kto też szuka po nazwie konta
         found = officer_map_from(officers).get(member.name.lower())
         if not found:
             await interaction.followup.send(f"❓ **{member.name}** nie ma w bazie LSPD.", ephemeral=True)
@@ -670,25 +640,25 @@ class LSPDCog(commands.Cog):
             return
         status = "🔴 ZAWIESZONY" if found.get("suspended") else ("🟡 URLOP" if found.get("onLeave") else "🟢 AKTYWNY")
         units  = [u.upper() for u in ["swat","iad","ftd"] if found.get(u)]
-        embed = nextcord.Embed(title=f"👮 {found.get('name')}", color=nextcord.Color.blue())
-        embed.add_field(name="Stopień",  value=found.get("rank","—"),      inline=True)
+        embed  = nextcord.Embed(title=f"👮 {found.get('name')}", color=nextcord.Color.blue())
+        embed.add_field(name="Stopień",  value=found.get("rank","—"),       inline=True)
         embed.add_field(name="Odznaka", value=f"#{found.get('badge','—')}", inline=True)
-        embed.add_field(name="Status",  value=status,                       inline=True)
+        embed.add_field(name="Status",  value=status,                        inline=True)
         if units:
             embed.add_field(name="Jednostki", value=", ".join(units), inline=False)
         await interaction.followup.send(embed=embed)
         await self._log(interaction.guild, "🔍 /kto", f"**Wykonał:** {interaction.user.mention}\n**Sprawdził:** {member.mention}\n**Wynik:** {found.get('name')} | {found.get('rank','—')} | {status}", 0x3498db)
 
-    @slash_command(name="debug", description="Debug — szczegoly dla znalezionego usera", guild_ids=[GUILD_ID])
+    @slash_command(name="debug", description="Debug — szczegóły dla znalezionego usera", guild_ids=[GUILD_ID])
     async def cmd_debug(self, interaction: Interaction, member: nextcord.Member):
         if not interaction.user.guild_permissions.manage_roles:
-            await interaction.response.send_message("Brak uprawnien.", ephemeral=True)
+            await interaction.response.send_message("Brak uprawnień.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
         officers = await fetch_officers()
-        omap = officer_map_from(officers)
-        officer = omap.get(member.name.lower())
+        omap     = officer_map_from(officers)
+        officer  = omap.get(member.name.lower())
 
         if not officer:
             await interaction.followup.send(f"NIE ZNALEZIONO `{member.name}` w bazie.\nNicki w bazie: {', '.join(sorted(omap.keys()))}", ephemeral=True)
@@ -696,32 +666,32 @@ class LSPDCog(commands.Cog):
 
         guild_roles = {r.name: r for r in interaction.guild.roles}
 
-        rank = officer.get("rank", "")
+        rank             = officer.get("rank", "")
         target_role_name = RANK_TO_ROLE.get(rank, "BRAK W MAPOWANIU")
-        target_nick = build_nickname(officer)
+        target_nick      = build_nickname(officer)
 
-        current_lspd = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
-        has_target = any(r.name == target_role_name for r in member.roles)
-        rank_to_remove = [r for r in current_lspd if r.name != target_role_name]
-        rank_ok = has_target and len(rank_to_remove) == 0
+        current_lspd    = [r for r in member.roles if r.name in ALL_LSPD_ROLES]
+        has_target      = any(r.name == target_role_name for r in member.roles)
+        rank_to_remove  = [r for r in current_lspd if r.name != target_role_name]
+        rank_ok         = has_target and len(rank_to_remove) == 0
 
         current_unit_roles = {r for r in member.roles if r.name in ALL_UNIT_ROLES}
-        target_unit_roles = set()
+        target_unit_roles  = set()
         for field, role_name in UNIT_TO_ROLE.items():
             if officer.get(field):
                 r = guild_roles.get(role_name)
                 if r:
                     target_unit_roles.add(r)
-        units_to_add = target_unit_roles - current_unit_roles
+        units_to_add    = target_unit_roles - current_unit_roles
         units_to_remove = current_unit_roles - target_unit_roles
-        units_ok = not units_to_add and not units_to_remove
+        units_ok        = not units_to_add and not units_to_remove
 
         nick_changed = bool(target_nick) and member.display_name != target_nick
 
         lines = [
             f"**Debug dla `{member.name}`**",
             f"",
-            f"**Baza:**",
+            f"**Baza (Supabase):**",
             f"  nick: `{officer.get('nick')}`",
             f"  name: `{officer.get('name')}`",
             f"  badge: `{officer.get('badge')}`",
@@ -734,14 +704,14 @@ class LSPDCog(commands.Cog):
             f"  role stopnia: `{[r.name for r in current_lspd]}`",
             f"  role jednostek: `{[r.name for r in current_unit_roles]}`",
             f"",
-            f"**Co chce zrobic:**",
+            f"**Co chce zrobić:**",
             f"  target_role: `{target_role_name}` | rank_ok: `{rank_ok}`",
             f"  target_nick: `{target_nick}` | nick_changed: `{nick_changed}`",
             f"  units_to_add: `{[r.name for r in units_to_add]}`",
             f"  units_to_remove: `{[r.name for r in units_to_remove]}`",
             f"  units_ok: `{units_ok}`",
             f"",
-            f"**Wynik:** {'SKIPPED (nic do zmiany)' if rank_ok and units_ok and not nick_changed else 'POWINIEN ZMIENIC'}",
+            f"**Wynik:** {'SKIPPED (nic do zmiany)' if rank_ok and units_ok and not nick_changed else 'POWINIEN ZMIENIĆ'}",
         ]
 
         await interaction.followup.send("\n".join(lines), ephemeral=True)
@@ -758,22 +728,16 @@ class LSPDCog(commands.Cog):
             await interaction.followup.send("❌ Nie udało się pobrać danych z bazy.")
             return
 
-        omap = officer_map_from(officers)
+        omap  = officer_map_from(officers)
         guild = interaction.guild
-        guild_roles = {r.name: r for r in guild.roles}
 
         missing_mentions = []
-
         for member in guild.members:
             if member.bot:
                 continue
-
-            # Sprawdź czy ma jakąkolwiek rolę stopnia LSPD
             has_rank_role = any(r.name in ALL_LSPD_ROLES for r in member.roles)
             if not has_rank_role:
                 continue
-
-            # Sprawdź czy jest w bazie
             if omap.get(member.name.lower()) is None:
                 missing_mentions.append(member.mention)
 
@@ -789,6 +753,55 @@ class LSPDCog(commands.Cog):
         else:
             await interaction.followup.send("✅ Wszystkie osoby z rolami stopni są w bazie.", ephemeral=True)
             await self._log(interaction.guild, "⚠️ /helper", f"**Wykonał:** {interaction.user.mention}\n✅ Wszyscy z rolami stopni są w bazie.", 0x2ecc71)
+
+    # ─── NAPRAWIONA KOMENDA /przypomnienie ────────────────────────────────────
+    @slash_command(name="przypomnienie", description="Pinguje osoby bez wpisu w bazie lub bez danych IC", guild_ids=[GUILD_ID])
+    async def cmd_przypomnienie(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
+            return
+        await interaction.response.defer()
+
+        officers = await fetch_officers()
+        if not officers:
+            await interaction.followup.send("❌ Nie udało się pobrać danych z bazy.")
+            return
+
+        omap  = officer_map_from(officers)
+        guild = interaction.guild
+
+        no_entry_mentions = []
+        no_name_mentions  = []
+
+        for member in guild.members:
+            if member.bot:
+                continue
+            officer = omap.get(member.name.lower())
+            if officer is None:
+                no_entry_mentions.append(member.mention)
+            else:
+                name_field = (officer.get("name") or "").strip()
+                if not name_field:
+                    no_name_mentions.append(member.mention)
+
+        if no_entry_mentions:
+            await interaction.channel.send(
+                f"**🎫 Stwórz ticket z raportem o stopień:**\n{', '.join(no_entry_mentions)}"
+            )
+        if no_name_mentions:
+            await interaction.channel.send(
+                f"**📝 Ustaw dane IC jako pseudonim!**\n{', '.join(no_name_mentions)}"
+            )
+
+        if not no_entry_mentions and not no_name_mentions:
+            await interaction.followup.send("✅ Wszyscy członkowie mają kompletne dane w bazie.", ephemeral=True)
+            await self._log(interaction.guild, "🔔 /przypomnienie", f"**Wykonał:** {interaction.user.mention}\n✅ Wszyscy mają kompletne dane.", 0x2ecc71)
+        else:
+            await interaction.followup.send(
+                f"✅ Wysłano przypomnienia: **{len(no_entry_mentions)}** bez wpisu w bazie, **{len(no_name_mentions)}** bez danych IC.",
+                ephemeral=True
+            )
+            await self._log(interaction.guild, "🔔 /przypomnienie", f"**Wykonał:** {interaction.user.mention}\n🎫 Bez wpisu: **{len(no_entry_mentions)}** | 📝 Bez IC: **{len(no_name_mentions)}**", 0xf39c12)
 
     @slash_command(name="ticket-setup", description="Wysyła panel ticketów na kanał", guild_ids=[GUILD_ID])
     async def cmd_ticket_setup(self, interaction: Interaction):
@@ -832,11 +845,9 @@ class LSPDCog(commands.Cog):
 
         ch = interaction.guild.get_channel(IAD_AKTA_CHANNEL_ID)
         if not ch:
-            # Wypisz dostępne kanały żeby pomóc zdebugować
             channels_info = "\n".join(f"• `{c.name}` — `{c.id}`" for c in interaction.guild.text_channels[:30])
             await interaction.followup.send(
-                f"❌ **Kanał `{IAD_AKTA_CHANNEL_ID}` nie znaleziony!**\n\n"
-                f"Dostępne kanały tekstowe:\n{channels_info}",
+                f"❌ **Kanał `{IAD_AKTA_CHANNEL_ID}` nie znaleziony!**\n\nDostępne kanały:\n{channels_info}",
                 ephemeral=True
             )
             return
@@ -848,20 +859,16 @@ class LSPDCog(commands.Cog):
                 color=0xe74c3c,
                 timestamp=datetime.utcnow()
             )
-            embed.add_field(name="👤 Funkcjonariusz", value="Jan Testowy",        inline=True)
-            embed.add_field(name="⚖️ Konsekwencja",  value="MINUS",              inline=True)
-            embed.add_field(name="📋 Powód",          value="Test systemu IAD",   inline=False)
-            embed.add_field(name="✍️ Podpisał",       value="IAD Chief",          inline=True)
-            embed.add_field(name="📅 Data",           value="2025-01-01",         inline=True)
+            embed.add_field(name="👤 Funkcjonariusz", value="Jan Testowy",       inline=True)
+            embed.add_field(name="⚖️ Konsekwencja",  value="MINUS",             inline=True)
+            embed.add_field(name="📋 Powód",          value="Test systemu IAD",  inline=False)
+            embed.add_field(name="✍️ Podpisał",       value="IAD Chief",         inline=True)
+            embed.add_field(name="📅 Data",           value="2025-01-01",        inline=True)
             embed.set_footer(text="LSPD IAD — System Akt")
             await ch.send(content=interaction.user.mention, embed=embed)
             await interaction.followup.send(f"✅ Test wysłany na {ch.mention}!", ephemeral=True)
         except nextcord.Forbidden:
-            await interaction.followup.send(
-                f"❌ **Brak uprawnień do wysłania na {ch.mention}!**\n"
-                f"Sprawdź czy bot ma uprawnienie `Send Messages` na tym kanale.",
-                ephemeral=True
-            )
+            await interaction.followup.send(f"❌ **Brak uprawnień do wysłania na {ch.mention}!**", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Błąd: `{e}`", ephemeral=True)
 
@@ -872,68 +879,164 @@ class LSPDCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         global _akta_initialized
-        # Zresetuj flagę żeby wymusić ponowną inicjalizację i wykrycie nowych
         _akta_initialized = False
         await check_new_akta(interaction.guild)
         await interaction.followup.send(
-            f"✅ Sprawdzono akta IAD. Znane IDs: `{len(_known_akta_ids)}`. Sprawdź logi bota po szczegóły.",
+            f"✅ Sprawdzono akta IAD. Znane IDs: `{len(_known_akta_ids)}`. Sprawdź logi po szczegóły.",
             ephemeral=True
         )
-    async def cmd_przypomnienie(self, interaction: Interaction):
-        if not interaction.user.guild_permissions.manage_roles:
-            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj rolami**.", ephemeral=True)
-            return
-        await interaction.response.defer()
 
-        officers = await fetch_officers()
-        if not officers:
-            await interaction.followup.send("❌ Nie udało się pobrać danych z bazy.")
-            return
+# ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
+TICKET_CHANNEL_ID = 1474113895990952117
 
-        omap = officer_map_from(officers)
-        guild = interaction.guild
+TICKET_TYPES = {
+    "raport_stopien": {
+        "label":          "📋 Raport o stopień",
+        "description":    "Złóż raport z prośbą o nadanie stopnia w LSPD.",
+        "color":          0x1e5fc4,
+        "roles":          [1367513692383608985],
+        "channel_prefix": "raport",
+    },
+    "pytanie_hc": {
+        "label":          "👮 Pytanie do HC",
+        "description":    "Zadaj pytanie do High Command LSPD.",
+        "color":          0x9b59b6,
+        "roles":          [1367513692383608985],
+        "channel_prefix": "pytanie-hc",
+    },
+    "sprawa_iad": {
+        "label":          "🔍 Sprawa do IAD",
+        "description":    "Zgłoś sprawę do Wydziału Spraw Wewnętrznych (IAD).",
+        "color":          0xe74c3c,
+        "roles":          [1368229314251984919, 1368227491667378288],
+        "channel_prefix": "iad",
+    },
+    "podanie_fto": {
+        "label":          "📝 Podanie na FTO",
+        "description":    "Złóż podanie do programu Field Training Officer.",
+        "color":          0x2ecc71,
+        "roles":          [1368230039971303485, 1368227491667378288],
+        "channel_prefix": "fto",
+    },
+}
 
-        no_entry_mentions = []
-        no_name_mentions  = []
+class TicketTypeSelect(nextcord.ui.Select):
+    def __init__(self):
+        options = [
+            nextcord.SelectOption(label=v["label"], value=k, description=v["description"])
+            for k, v in TICKET_TYPES.items()
+        ]
+        super().__init__(
+            placeholder="Wybierz rodzaj ticketu...",
+            options=options,
+            min_values=1,
+            max_values=1,
+            custom_id="persistent_ticket_select"
+        )
 
-        for member in guild.members:
-            if member.bot:
-                continue
+    async def callback(self, interaction: Interaction):
+        try:
+            ticket_type = self.values[0]
+            cfg         = TICKET_TYPES[ticket_type]
+            guild       = interaction.guild
 
-            officer = omap.get(member.name.lower())
+            channel_name = f"{cfg['channel_prefix']}-{interaction.user.id}"
+            existing     = nextcord.utils.get(guild.text_channels, name=channel_name)
+            if existing:
+                await interaction.response.send_message(
+                    f"❌ Masz już otwarty ticket tego typu: {existing.mention}", ephemeral=True
+                )
+                return
 
-            if officer is None:
-                no_entry_mentions.append(member.mention)
+            await interaction.response.defer(ephemeral=True)
+
+            overwrites = {
+                guild.default_role: nextcord.PermissionOverwrite(read_messages=False),
+                interaction.user:   nextcord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me:           nextcord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            }
+            for role_id in cfg["roles"]:
+                role = guild.get_role(role_id)
+                if role:
+                    overwrites[role] = nextcord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+            ticket_ch = guild.get_channel(TICKET_CHANNEL_ID)
+            category  = ticket_ch.category if ticket_ch else None
+
+            ticket_channel = await guild.create_text_channel(
+                name=channel_name,
+                overwrites=overwrites,
+                category=category,
+                reason=f"Ticket: {cfg['label']} — {interaction.user}"
+            )
+
+            embed = nextcord.Embed(
+                title=cfg["label"],
+                description=(
+                    f"Witaj {interaction.user.mention}!\n\n"
+                    f"{cfg['description']}\n\n"
+                    f"Opisz swoją sprawę jak najdokładniej. "
+                    f"Odpowiedni personel zajmie się Twoim zgłoszeniem wkrótce.\n\n"
+                    f"Aby zamknąć ticket użyj przycisku poniżej."
+                ),
+                color=cfg["color"],
+                timestamp=datetime.utcnow()
+            )
+            embed.set_thumbnail(url=guild.me.display_avatar.url)
+            embed.set_footer(text="LSPD Ticket System")
+
+            roles_mentions = " ".join(f"<@&{r}>" for r in cfg["roles"])
+            view           = CloseTicketView()
+            await ticket_channel.send(content=roles_mentions, embed=embed, view=view)
+            await interaction.followup.send(f"✅ Twój ticket: {ticket_channel.mention}", ephemeral=True)
+
+        except nextcord.Forbidden:
+            log.error(f"[TICKET] Brak uprawnień — {interaction.user}")
+            try:
+                await interaction.followup.send("❌ Brak uprawnień do tworzenia kanałów.", ephemeral=True)
+            except Exception:
+                pass
+        except Exception as e:
+            log.error(f"[TICKET] Błąd: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(f"❌ Błąd: {e}", ephemeral=True)
+            except Exception:
+                pass
+
+class TicketSelectView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketTypeSelect())
+
+    async def on_error(self, error: Exception, interaction: Interaction) -> None:
+        log.error(f"[TICKET SELECT ERROR] {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Błąd: {error}", ephemeral=True)
             else:
-                name_field = (officer.get("name") or "").strip()
-                if not name_field:
-                    no_name_mentions.append(member.mention)
+                await interaction.followup.send(f"❌ Błąd: {error}", ephemeral=True)
+        except Exception:
+            pass
 
-        if no_entry_mentions:
-            await interaction.channel.send(
-                f"**🎫 Stwórz ticket z raportem o stopień:**\n{', '.join(no_entry_mentions)}"
-            )
-        if no_name_mentions:
-            await interaction.channel.send(
-                f"**📝 Ustaw dane IC jako pseudonim!**\n{', '.join(no_name_mentions)}"
-            )
+class CloseTicketView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
 
-        if not no_entry_mentions and not no_name_mentions:
-            await interaction.followup.send("✅ Wszyscy członkowie mają kompletne dane w bazie.", ephemeral=True)
-            await self._log(interaction.guild, "🔔 /przypomnienie", f"**Wykonał:** {interaction.user.mention}\n✅ Wszyscy mają kompletne dane.", 0x2ecc71)
-        else:
-            await interaction.followup.send(
-                f"✅ Wysłano przypomnienia: **{len(no_entry_mentions)}** bez wpisu w bazie, **{len(no_name_mentions)}** bez danych IC.",
-                ephemeral=True
-            )
-            await self._log(interaction.guild, "🔔 /przypomnienie", f"**Wykonał:** {interaction.user.mention}\n🎫 Bez wpisu w bazie: **{len(no_entry_mentions)}**\n📝 Bez danych IC: **{len(no_name_mentions)}**", 0xf39c12)
-
-def officer_map_from(officers: list) -> dict:
-    return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
-
-WELCOME_CHANNEL_ID = 1367506926056767532
+    @nextcord.ui.button(label="🔒 Zamknij ticket", style=nextcord.ButtonStyle.red, custom_id="close_ticket")
+    async def close_ticket(self, button: nextcord.ui.Button, interaction: Interaction):
+        embed = nextcord.Embed(
+            title="🔒 Ticket zamknięty",
+            description=f"Ticket zamknięty przez {interaction.user.mention}.\nKanał zostanie usunięty za 5 sekund.",
+            color=0xe74c3c,
+            timestamp=datetime.utcnow()
+        )
+        await interaction.response.send_message(embed=embed)
+        await asyncio.sleep(5)
+        await interaction.channel.delete(reason=f"Ticket zamknięty przez {interaction.user}")
 
 # ─── POWITANIE NOWYCH CZŁONKÓW ────────────────────────────────────────────────
+WELCOME_CHANNEL_ID = 1367506926056767532
+
 @bot.event
 async def on_member_join(member: nextcord.Member):
     channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
@@ -961,168 +1064,6 @@ async def on_member_join(member: nextcord.Member):
     await channel.send(embed=embed)
     await update_status()
 
-# ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
-TICKET_CHANNEL_ID = 1474113895990952117
-
-TICKET_TYPES = {
-    "raport_stopien": {
-        "label":       "📋 Raport o stopień",
-        "description": "Złóż raport z prośbą o nadanie stopnia w LSPD.",
-        "color":       0x1e5fc4,
-        "roles":       [1367513692383608985],
-        "channel_prefix": "raport",
-    },
-    "pytanie_hc": {
-        "label":       "👮 Pytanie do HC",
-        "description": "Zadaj pytanie do High Command LSPD.",
-        "color":       0x9b59b6,
-        "roles":       [1367513692383608985],
-        "channel_prefix": "pytanie-hc",
-    },
-    "sprawa_iad": {
-        "label":       "🔍 Sprawa do IAD",
-        "description": "Zgłoś sprawę do Wydziału Spraw Wewnętrznych (IAD).",
-        "color":       0xe74c3c,
-        "roles":       [1368229314251984919, 1368227491667378288],
-        "channel_prefix": "iad",
-    },
-    "podanie_fto": {
-        "label":       "📝 Podanie na FTO",
-        "description": "Złóż podanie do programu Field Training Officer.",
-        "color":       0x2ecc71,
-        "roles":       [1368230039971303485, 1368227491667378288],
-        "channel_prefix": "fto",
-    },
-}
-
-class TicketTypeSelect(nextcord.ui.Select):
-    def __init__(self):
-        options = [
-            nextcord.SelectOption(label=v["label"], value=k, description=v["description"])
-            for k, v in TICKET_TYPES.items()
-        ]
-        super().__init__(
-            placeholder="Wybierz rodzaj ticketu...",
-            options=options,
-            min_values=1,
-            max_values=1,
-            custom_id="persistent_ticket_select"
-        )
-
-    async def callback(self, interaction: Interaction):
-        try:
-            ticket_type = self.values[0]
-            cfg = TICKET_TYPES[ticket_type]
-            guild = interaction.guild
-
-            # Sprawdź czy użytkownik już ma otwarty ticket tego typu
-            channel_name = f"{cfg['channel_prefix']}-{interaction.user.id}"
-            existing = nextcord.utils.get(guild.text_channels, name=channel_name)
-            if existing:
-                await interaction.response.send_message(
-                    f"❌ Masz już otwarty ticket tego typu: {existing.mention}", ephemeral=True
-                )
-                return
-
-            # Odłóż odpowiedź — tworzenie kanału może trwać ponad 3 sekundy
-            await interaction.response.defer(ephemeral=True)
-
-            # Uprawnienia kanału
-            overwrites = {
-                guild.default_role: nextcord.PermissionOverwrite(read_messages=False),
-                interaction.user:   nextcord.PermissionOverwrite(read_messages=True, send_messages=True),
-                guild.me:           nextcord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-            }
-            for role_id in cfg["roles"]:
-                role = guild.get_role(role_id)
-                if role:
-                    overwrites[role] = nextcord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-            # Kategoria — ta sama co kanał ticketów
-            ticket_ch = guild.get_channel(TICKET_CHANNEL_ID)
-            category = ticket_ch.category if ticket_ch else None
-
-            ticket_channel = await guild.create_text_channel(
-                name=channel_name,
-                overwrites=overwrites,
-                category=category,
-                reason=f"Ticket: {cfg['label']} — {interaction.user}"
-            )
-
-            # Embed powitalny w tickecie
-            embed = nextcord.Embed(
-                title=cfg["label"],
-                description=(
-                    f"Witaj {interaction.user.mention}!\n\n"
-                    f"{cfg['description']}\n\n"
-                    f"Opisz swoją sprawę jak najdokładniej. "
-                    f"Odpowiedni personel zajmie się Twoim zgłoszeniem wkrótce.\n\n"
-                    f"Aby zamknąć ticket użyj przycisku poniżej."
-                ),
-                color=cfg["color"],
-                timestamp=datetime.utcnow()
-            )
-            embed.set_thumbnail(url=guild.me.display_avatar.url)
-            embed.set_footer(text="LSPD Ticket System")
-
-            roles_mentions = " ".join(f"<@&{r}>" for r in cfg["roles"])
-
-            view = CloseTicketView()
-            await ticket_channel.send(content=roles_mentions, embed=embed, view=view)
-            await interaction.followup.send(
-                f"✅ Twój ticket został utworzony: {ticket_channel.mention}", ephemeral=True
-            )
-
-        except nextcord.Forbidden:
-            log.error(f"[TICKET] Brak uprawnień — {interaction.user} / {interaction.guild}")
-            try:
-                await interaction.followup.send("❌ Brak uprawnień do tworzenia kanałów. Skontaktuj się z adminem.", ephemeral=True)
-            except Exception:
-                pass
-        except Exception as e:
-            log.error(f"[TICKET] Błąd tworzenia ticketu: {e}", exc_info=True)
-            try:
-                await interaction.followup.send(f"❌ Wystąpił błąd: {e}", ephemeral=True)
-            except Exception:
-                pass
-
-class TicketSelectView(nextcord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(TicketTypeSelect())
-
-    @classmethod
-    def create(cls):
-        """Tworzy świeży widok do wysłania na kanał."""
-        return cls()
-
-    async def on_error(self, error: Exception, interaction: Interaction) -> None:
-        log.error(f"[TICKET SELECT ERROR] {error}", exc_info=True)
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Błąd: {error}", ephemeral=True)
-            else:
-                await interaction.followup.send(f"❌ Błąd: {error}", ephemeral=True)
-        except Exception:
-            pass
-
-class CloseTicketView(nextcord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @nextcord.ui.button(label="🔒 Zamknij ticket", style=nextcord.ButtonStyle.red, custom_id="close_ticket")
-    async def close_ticket(self, button: nextcord.ui.Button, interaction: Interaction):
-        embed = nextcord.Embed(
-            title="🔒 Ticket zamknięty",
-            description=f"Ticket zamknięty przez {interaction.user.mention}.\nKanał zostanie usunięty za 5 sekund.",
-            color=0xe74c3c,
-            timestamp=datetime.utcnow()
-        )
-        embed.set_thumbnail(url=interaction.guild.me.display_avatar.url)
-        await interaction.response.send_message(embed=embed)
-        await asyncio.sleep(5)
-        await interaction.channel.delete(reason=f"Ticket zamknięty przez {interaction.user}")
-
 # ─── ON READY ─────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
@@ -1133,7 +1074,6 @@ async def on_ready():
         auto_sync.start()
     if not iad_akta_watch.is_running():
         iad_akta_watch.start()
-    # Zainicjalizuj znane akta IAD żeby nie spamować przy starcie
     guild = bot.get_guild(GUILD_ID)
     if guild:
         await check_new_akta(guild)
@@ -1141,10 +1081,18 @@ async def on_ready():
 
 # ─── START ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    for var, val in [("DISCORD_TOKEN", DISCORD_TOKEN), ("GUILD_ID", GUILD_ID),
-                     ("JSONBIN_BIN_ID", JSONBIN_BIN_ID), ("JSONBIN_API_KEY", JSONBIN_API_KEY)]:
+    missing = []
+    for var, val in [
+        ("DISCORD_TOKEN", DISCORD_TOKEN),
+        ("GUILD_ID",      GUILD_ID),
+        ("SUPABASE_URL",  SUPABASE_URL),
+        ("SUPABASE_KEY",  SUPABASE_KEY),
+    ]:
         if not val:
-            log.error(f"Brak zmiennej środowiskowej: {var}")
-            exit(1)
+            missing.append(var)
+    if missing:
+        for m in missing:
+            log.error(f"Brak zmiennej środowiskowej: {m}")
+        exit(1)
     bot.add_cog(LSPDCog(bot))
     bot.run(DISCORD_TOKEN)
