@@ -103,6 +103,9 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ─── SUPABASE — WARSTWA DANYCH ────────────────────────────────────────────────
+# Baza używa JEDNEJ tabeli: lspd_data, jeden wiersz id="main"
+# Cała zawartość to JSON w kolumnach: officers (list), iad (dict z .akta), ftd itp.
+
 def _sb_headers() -> dict:
     return {
         "apikey":        SUPABASE_KEY,
@@ -111,56 +114,69 @@ def _sb_headers() -> dict:
         "Prefer":        "return=representation",
     }
 
-async def fetch_officers() -> list:
-    """
-    Pobiera listę oficerów z Supabase.
-    Tabela: officers
-    Kolumny: id, nick, name, badge, rank, swat, iad, ftd, fac, seu, sv, nt, pwc, wu, k9,
-             suspended, redEntry, yellowEntry, onLeave, commandBureau
-    """
-    url = f"{SUPABASE_URL}/rest/v1/officers?select=*"
+async def fetch_full_record() -> dict:
+    """Pobiera pełny rekord lspd_data?id=main z Supabase."""
+    url = f"{SUPABASE_URL}/rest/v1/lspd_data?id=eq.main&select=*"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=_sb_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
-                    log.error(f"[Supabase] fetch_officers HTTP {resp.status}: {await resp.text()}")
-                    return []
-                return await resp.json()
+                    log.error(f"[Supabase] fetch_full_record HTTP {resp.status}: {await resp.text()}")
+                    return {}
+                rows = await resp.json()
+                if not rows:
+                    log.error("[Supabase] fetch_full_record — brak wiersza id=main!")
+                    return {}
+                return rows[0]
     except Exception as e:
-        log.error(f"[Supabase] fetch_officers error: {e}")
-        return []
+        log.error(f"[Supabase] fetch_full_record error: {e}")
+        return {}
 
-async def update_officer(officer_id, data: dict) -> bool:
-    """Aktualizuje pojedynczego oficera po id."""
-    url = f"{SUPABASE_URL}/rest/v1/officers?id=eq.{officer_id}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.patch(url, headers=_sb_headers(), json=data, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                ok = resp.status in (200, 204)
-                if not ok:
-                    log.error(f"[Supabase] update_officer HTTP {resp.status}: {await resp.text()}")
-                return ok
-    except Exception as e:
-        log.error(f"[Supabase] update_officer error: {e}")
-        return False
+async def fetch_officers() -> list:
+    """Zwraca listę oficerów z lspd_data.officers"""
+    record = await fetch_full_record()
+    officers = record.get("officers", [])
+    log.info(f"[Supabase] fetch_officers — {len(officers)} oficerów")
+    return officers
 
 async def fetch_iad_akta() -> list:
-    """
-    Pobiera akta IAD z Supabase.
-    Tabela: iad_akta
-    Kolumny: id, imieNazwisko, konsekwencja, zawieszenieCzas, powod, podpisal, data
-    """
-    url = f"{SUPABASE_URL}/rest/v1/iad_akta?select=*&order=id.desc"
+    """Zwraca listę akt IAD z lspd_data.iad.akta"""
+    record = await fetch_full_record()
+    iad    = record.get("iad", {})
+    akta   = iad.get("akta", [])
+    log.info(f"[Supabase] fetch_iad_akta — {len(akta)} akt")
+    return akta
+
+async def save_full_record(data: dict) -> bool:
+    """Zapisuje pełny rekord do lspd_data id=main (PATCH)."""
+    url = f"{SUPABASE_URL}/rest/v1/lspd_data?id=eq.main"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=_sb_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    log.error(f"[Supabase] fetch_iad_akta HTTP {resp.status}: {await resp.text()}")
-                    return []
-                return await resp.json()
+            async with session.patch(url, headers=_sb_headers(), json=data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                ok = resp.status in (200, 204)
+                if not ok:
+                    log.error(f"[Supabase] save_full_record HTTP {resp.status}: {await resp.text()}")
+                return ok
     except Exception as e:
-        log.error(f"[Supabase] fetch_iad_akta error: {e}")
-        return []
+        log.error(f"[Supabase] save_full_record error: {e}")
+        return False
+
+async def update_officer(officer_id, patch: dict) -> bool:
+    """Aktualizuje konkretnego oficera (po id) w tablicy officers."""
+    record = await fetch_full_record()
+    if not record:
+        return False
+    officers = record.get("officers", [])
+    updated  = False
+    for o in officers:
+        if o.get("id") == officer_id:
+            o.update(patch)
+            updated = True
+            break
+    if not updated:
+        log.warning(f"[Supabase] update_officer — nie znaleziono id={officer_id}")
+        return False
+    return await save_full_record({"officers": officers})
 
 # ─── WATCHER AKAT IAD → DISCORD ───────────────────────────────────────────────
 _known_akta_ids: set = set()
@@ -264,13 +280,17 @@ def officer_map_from(officers: list) -> dict:
 
 # ─── SYNC LOGIC ───────────────────────────────────────────────────────────────
 async def sync_roles(guild: nextcord.Guild) -> dict:
-    officers = await fetch_officers()
-    if not officers:
+    record = await fetch_full_record()
+    if not record:
         return {"error": "Nie udało się pobrać danych z Supabase"}
+    officers = record.get("officers", [])
+    if not officers:
+        return {"error": "Brak oficerów w bazie (officers jest pusty)"}
 
     officer_map = officer_map_from(officers)
     results = {"updated": [], "skipped": [], "not_found": [], "errors": []}
     guild_roles = {r.name: r for r in guild.roles}
+    db_dirty = False  # czy trzeba zapisać zmiany do Supabase
 
     for member in guild.members:
         if member.bot:
@@ -355,7 +375,7 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         try:
             if badge_changed:
                 officer["badge"] = new_badge
-                await update_officer(officer["id"], {"badge": new_badge})
+                db_dirty = True
                 changes.append(f"odznaka→#{new_badge}")
 
             if not rank_ok:
@@ -390,7 +410,8 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                 changes.append(f"nick→{target_nick}")
 
             if cb_changed:
-                await update_officer(officer["id"], {"commandBureau": has_cb})
+                officer["commandBureau"] = has_cb
+                db_dirty = True
                 changes.append(f"commandBureau→{has_cb}")
 
             summary = f"{member.name} ({', '.join(changes)})"
@@ -401,6 +422,16 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
             results["errors"].append(f"Brak uprawnień: {member.name}")
         except Exception as e:
             results["errors"].append(f"{member.name}: {e}")
+
+    # Zapisz do Supabase jednym requestem jeśli cokolwiek się zmieniło w bazie
+    if db_dirty:
+        record["officers"] = officers
+        ok = await save_full_record({"officers": officers})
+        if ok:
+            log.info(f"[SYNC] Zapisano zmiany bazy do Supabase")
+        else:
+            log.error(f"[SYNC] Błąd zapisu do Supabase!")
+            results["errors"].append("Błąd zapisu zmian do Supabase")
 
     return results
 
