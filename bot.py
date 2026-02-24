@@ -375,6 +375,7 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         try:
             if badge_changed:
                 officer["badge"] = new_badge
+                officer["_bot_patched"] = True  # oznacz do bezpiecznego zapisu
                 db_dirty = True
                 changes.append(f"odznaka→#{new_badge}")
 
@@ -411,6 +412,7 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
 
             if cb_changed:
                 officer["commandBureau"] = has_cb
+                officer["_bot_patched"] = True  # oznacz do bezpiecznego zapisu
                 db_dirty = True
                 changes.append(f"commandBureau→{has_cb}")
 
@@ -423,15 +425,35 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         except Exception as e:
             results["errors"].append(f"{member.name}: {e}")
 
-    # Zapisz do Supabase jednym requestem jeśli cokolwiek się zmieniło w bazie
+    # Zapisz zmiany odznak do Supabase — BEZPIECZNY sposób:
+    # Pobieramy ŚWIEŻY rekord tuż przed zapisem, nakładamy tylko zmiany odznak/commandBureau
+    # i zapisujemy. Dzięki temu nie nadpisujemy zmian wprowadzonych przez panel webowy.
     if db_dirty:
-        record["officers"] = officers
-        ok = await save_full_record({"officers": officers})
-        if ok:
-            log.info(f"[SYNC] Zapisano zmiany bazy do Supabase")
+        # Zbierz tylko zmiany które bot chce zapisać (id → patch)
+        badge_patches = {}
+        for o in officers:
+            if "_bot_patched" in o:
+                badge_patches[o["id"]] = {k: v for k, v in o.items() if k != "_bot_patched"}
+
+        # Pobierz świeży rekord z Supabase
+        fresh_record = await fetch_full_record()
+        if fresh_record:
+            fresh_officers = fresh_record.get("officers", [])
+            # Nałóż tylko zmiany odznak/commandBureau na świeże dane
+            for fo in fresh_officers:
+                patch = badge_patches.get(fo.get("id"))
+                if patch:
+                    fo["badge"]         = patch.get("badge",         fo.get("badge"))
+                    fo["commandBureau"] = patch.get("commandBureau", fo.get("commandBureau"))
+            ok = await save_full_record({"officers": fresh_officers})
+            if ok:
+                log.info(f"[SYNC] Zapisano zmiany odznak do Supabase (świeży rekord, {len(badge_patches)} zmian)")
+            else:
+                log.error(f"[SYNC] Błąd zapisu do Supabase!")
+                results["errors"].append("Błąd zapisu zmian do Supabase")
         else:
-            log.error(f"[SYNC] Błąd zapisu do Supabase!")
-            results["errors"].append("Błąd zapisu zmian do Supabase")
+            log.error(f"[SYNC] Nie udało się pobrać świeżego rekordu przed zapisem — pominięto zapis")
+            results["errors"].append("Nie udało się pobrać świeżego rekordu do zapisu odznak")
 
     return results
 
@@ -588,42 +610,6 @@ class LSPDCog(commands.Cog):
             await ch.send(embed=embed)
         except Exception as e:
             log.error(f"Log channel send error: {e}")
-
-    @slash_command(name="rekrutacja-setup", description="Wysyła formularz rekrutacyjny LSPD Vespucci z przyciskiem do roli", guild_ids=[GUILD_ID])
-    async def cmd_rekrutacja_setup(self, interaction: Interaction):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-
-        channel = interaction.guild.get_channel(RECRUITMENT_CHANNEL_ID)
-        if not channel:
-            await interaction.followup.send(f"❌ Nie znaleziono kanału rekrutacyjnego (ID: {RECRUITMENT_CHANNEL_ID}).", ephemeral=True)
-            return
-
-        embed = nextcord.Embed(
-            title="🚔 Dołącz do LSPD Vespucci!",
-            description=(
-                "Hej! Jeśli szukasz miejsca, w którym liczy się profesjonalizm, dobra zabawa "
-                "i luźne podejście do służby — **LSPD Vespucci** czeka właśnie na Ciebie!\n\n"
-                "Masz chęć spróbować swoich sił w roli funkcjonariusza? Chcesz rozwijać swoją "
-                "postać, brać udział w dynamicznych akcjach i tworzyć wspaniałe wspomnienia?\n\n"
-                "Kliknij przycisk poniżej, aby otrzymać rolę i dołączyć do naszych szeregów!"
-            ),
-            color=0x1e5fc4,
-            timestamp=datetime.utcnow()
-        )
-        embed.set_footer(text="Los Santos Police Department · Vespucci Division")
-
-        view = RecruitmentView()
-        await channel.send(embed=embed, view=view)
-        await interaction.followup.send(f"✅ Formularz rekrutacyjny wysłany na {channel.mention}!", ephemeral=True)
-        await self._log(
-            interaction.guild,
-            "📋 Rekrutacja setup",
-            f"**Wykonał:** {interaction.user.mention}\nFormularz wysłany na {channel.mention}",
-            0x2ecc71
-        )
 
     @slash_command(name="centrala-setup", description="Wysyła szablony na wszystkie kanały kategorii Centrala", guild_ids=[GUILD_ID])
     async def cmd_centrala_setup(self, interaction: Interaction):
@@ -955,53 +941,6 @@ class LSPDCog(commands.Cog):
 
 # ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
 TICKET_CHANNEL_ID = 1474113895990952117
-# ─── REACTION ROLE — REKRUTACJA LSPD ─────────────────────────────────────────
-RECRUITMENT_CHANNEL_ID = 1473733264148660319
-RECRUITMENT_ROLE_ID    = 1473730397425897695
-RECRUITMENT_EMOJI      = "✅"
-_recruitment_message_id: int | None = None
-
-class RecruitmentView(nextcord.ui.View):
-    """Persistent view z przyciskiem do otrzymania roli LSPD Vespucci."""
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @nextcord.ui.button(
-        label="✅  Dołącz do LSPD Vespucci",
-        style=nextcord.ButtonStyle.success,
-        custom_id="persistent_recruitment_join"
-    )
-    async def join_lspd(self, button: nextcord.ui.Button, interaction: Interaction):
-        guild = interaction.guild
-        role  = guild.get_role(RECRUITMENT_ROLE_ID)
-        if not role:
-            await interaction.response.send_message(
-                "❌ Nie znaleziono roli. Skontaktuj się z administracją.", ephemeral=True
-            )
-            return
-
-        if role in interaction.user.roles:
-            await interaction.response.send_message(
-                "ℹ️ Już posiadasz tę rolę!", ephemeral=True
-            )
-            return
-
-        try:
-            await interaction.user.add_roles(role, reason="Rekrutacja LSPD — przycisk")
-            await interaction.response.send_message(
-                f"🎉 Witamy w **LSPD Vespucci**! Otrzymałeś/aś rolę **{role.name}**. Czekamy na Ciebie na służbie! 🚔",
-                ephemeral=True
-            )
-            log.info(f"[RECRUITMENT] {interaction.user} otrzymał rolę {role.name}")
-        except nextcord.Forbidden:
-            await interaction.response.send_message(
-                "❌ Bot nie ma uprawnień do nadania roli. Skontaktuj się z administracją.", ephemeral=True
-            )
-        except Exception as e:
-            log.error(f"[RECRUITMENT] Błąd nadania roli: {e}")
-            await interaction.response.send_message("❌ Wystąpił błąd. Spróbuj ponownie.", ephemeral=True)
-
-
 
 TICKET_TYPES = {
     "raport_stopien": {
@@ -1184,7 +1123,6 @@ async def on_ready():
     log.info(f"✅ Bot online: {bot.user} | Serwer: {GUILD_ID} | Sync co {SYNC_INTERVAL_MIN} min")
     bot.add_view(TicketSelectView())
     bot.add_view(CloseTicketView())
-    bot.add_view(RecruitmentView())
     if not auto_sync.is_running():
         auto_sync.start()
     if not iad_akta_watch.is_running():
