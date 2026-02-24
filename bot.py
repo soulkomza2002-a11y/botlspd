@@ -1115,8 +1115,8 @@ class CloseTicketView(nextcord.ui.View):
         await interaction.channel.delete(reason=f"Ticket zamknięty przez {interaction.user}")
 
 # ─── PRZYCISK DOŁĄCZ DO LSPD ─────────────────────────────────────────────────
-RECRUITMENT_ROLE_ID     = int(os.getenv("RECRUITMENT_ROLE_ID", "0"))   # ID roli nadawanej po kliknięciu
-RECRUITMENT_CHANNEL_ID  = int(os.getenv("RECRUITMENT_CHANNEL_ID", "0")) # ID kanału gdzie stoi embed
+RECRUITMENT_ROLE_ID     = 1473730397425897695
+RECRUITMENT_CHANNEL_ID  = 1473733264148660319
 
 class JoinLSPDView(nextcord.ui.View):
     def __init__(self):
