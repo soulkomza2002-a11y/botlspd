@@ -856,6 +856,33 @@ class LSPDCog(commands.Cog):
             )
             await self._log(interaction.guild, "🔔 /przypomnienie", f"**Wykonał:** {interaction.user.mention}\n🎫 Bez wpisu: **{len(no_entry_mentions)}** | 📝 Bez IC: **{len(no_name_mentions)}**", 0xf39c12)
 
+    @slash_command(name="rekrutacja-setup", description="Wysyła panel rekrutacyjny LSPD Vespucci", guild_ids=[GUILD_ID])
+    async def cmd_rekrutacja_setup(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
+            return
+
+        channel = interaction.guild.get_channel(RECRUITMENT_CHANNEL_ID) or interaction.channel
+
+        embed = nextcord.Embed(
+            title="🚔 Dołącz do LSPD Vespucci!",
+            description=(
+                "Hej! Jeśli szukasz miejsca, w którym liczy się profesjonalizm, "
+                "dobra zabawa i luźne podejście do służby — **LSPD Vespucci** czeka właśnie na Ciebie!\n\n"
+                "Masz chęć spróbować swoich sił w roli funkcjonariusza? "
+                "Chcesz rozwijać swoją postać, brać udział w dynamicznych akcjach "
+                "i tworzyć wspaniałe wspomnienia?\n\n"
+                "Kliknij przycisk poniżej, aby otrzymać rolę i dołączyć do naszych szeregów!"
+            ),
+            color=0x1e5fc4,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+        embed.set_footer(text="Los Santos Police Department · Vespucci Division")
+
+        await channel.send(embed=embed, view=JoinLSPDView())
+        await interaction.response.send_message(f"✅ Panel rekrutacyjny wysłany na {channel.mention}.", ephemeral=True)
+
     @slash_command(name="ticket-setup", description="Wysyła panel ticketów na kanał", guild_ids=[GUILD_ID])
     async def cmd_ticket_setup(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_guild:
@@ -1087,6 +1114,57 @@ class CloseTicketView(nextcord.ui.View):
         await asyncio.sleep(5)
         await interaction.channel.delete(reason=f"Ticket zamknięty przez {interaction.user}")
 
+# ─── PRZYCISK DOŁĄCZ DO LSPD ─────────────────────────────────────────────────
+RECRUITMENT_ROLE_ID     = int(os.getenv("RECRUITMENT_ROLE_ID", "0"))   # ID roli nadawanej po kliknięciu
+RECRUITMENT_CHANNEL_ID  = int(os.getenv("RECRUITMENT_CHANNEL_ID", "0")) # ID kanału gdzie stoi embed
+
+class JoinLSPDView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @nextcord.ui.button(
+        label="📋 Dołącz do LSPD Vespucci!",
+        style=nextcord.ButtonStyle.primary,
+        custom_id="join_lspd_button"
+    )
+    async def join_button(self, button: nextcord.ui.Button, interaction: Interaction):
+        guild = interaction.guild
+        role  = guild.get_role(RECRUITMENT_ROLE_ID)
+
+        if not role:
+            await interaction.response.send_message(
+                "❌ Nie znaleziono roli rekrutacyjnej. Skontaktuj się z administracją.",
+                ephemeral=True
+            )
+            log.error(f"[JOIN] Nie znaleziono roli o ID {RECRUITMENT_ROLE_ID}!")
+            return
+
+        if role in interaction.user.roles:
+            await interaction.response.send_message(
+                "ℹ️ Masz już tę rolę! Sprawdź kanały LSPD Vespucci.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            await interaction.user.add_roles(role, reason="Przycisk: Dołącz do LSPD Vespucci")
+            await interaction.response.send_message(
+                f"✅ Witaj w szeregach **LSPD Vespucci**, {interaction.user.mention}!\n"
+                f"Nadano Ci rolę **{role.name}**. Powodzenia w służbie! 🚔",
+                ephemeral=True
+            )
+            log.info(f"[JOIN] {interaction.user} otrzymał rolę {role.name}")
+        except nextcord.Forbidden:
+            await interaction.response.send_message(
+                "❌ Bot nie ma uprawnień do nadania roli. Skontaktuj się z administracją.",
+                ephemeral=True
+            )
+            log.error(f"[JOIN] Brak uprawnień do nadania roli {role.name} dla {interaction.user}")
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Błąd: {e}", ephemeral=True)
+            log.error(f"[JOIN] Błąd: {e}")
+
+
 # ─── POWITANIE NOWYCH CZŁONKÓW ────────────────────────────────────────────────
 WELCOME_CHANNEL_ID = 1367506926056767532
 
@@ -1123,6 +1201,7 @@ async def on_ready():
     log.info(f"✅ Bot online: {bot.user} | Serwer: {GUILD_ID} | Sync co {SYNC_INTERVAL_MIN} min")
     bot.add_view(TicketSelectView())
     bot.add_view(CloseTicketView())
+    bot.add_view(JoinLSPDView())
     if not auto_sync.is_running():
         auto_sync.start()
     if not iad_akta_watch.is_running():
