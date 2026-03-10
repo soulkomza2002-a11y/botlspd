@@ -1514,16 +1514,6 @@ class PodanieModal(nextcord.ui.Modal):
     def __init__(self):
         super().__init__(title="📋 Podanie do LSPD Vespucci", timeout=600)
 
-        self.nick = nextcord.ui.TextInput(
-            label="Nick Discord",
-            placeholder="Twój nick na Discordzie",
-            required=True, max_length=64,
-        )
-        self.plec = nextcord.ui.TextInput(
-            label="Płeć",
-            placeholder="Mężczyzna / Kobieta / Inne",
-            required=True, max_length=32,
-        )
         self.wiek = nextcord.ui.TextInput(
             label="Wiek [OOC]",
             placeholder="np. 20",
@@ -1532,93 +1522,31 @@ class PodanieModal(nextcord.ui.Modal):
         self.mutacje = nextcord.ui.TextInput(
             label="Czy posiadasz mutacje?",
             placeholder="Tak / Nie — jeśli tak, jakie?",
-            required=True, max_length=100,
-        )
-        self.imie_ic = nextcord.ui.TextInput(
-            label="Imię i nazwisko [IC]",
-            placeholder="np. John Kowalski",
-            required=True, max_length=80,
-        )
-        self.add_item(self.nick)
-        self.add_item(self.plec)
-        self.add_item(self.wiek)
-        self.add_item(self.mutacje)
-        self.add_item(self.imie_ic)
-
-    async def callback(self, interaction: nextcord.Interaction):
-        # Discord modals max 5 fields — split into part 2
-        await interaction.response.send_modal(PodanieModal2(
-            nick=self.nick.value,
-            plec=self.plec.value,
-            wiek=self.wiek.value,
-            mutacje=self.mutacje.value,
-            imie_ic=self.imie_ic.value,
-        ))
-
-class PodanieModal2(nextcord.ui.Modal):
-    def __init__(self, nick, plec, wiek, mutacje, imie_ic):
-        super().__init__(title="📋 Podanie do LSPD — część 2/3", timeout=600)
-        self._nick     = nick
-        self._plec     = plec
-        self._wiek     = wiek
-        self._mutacje  = mutacje
-        self._imie_ic  = imie_ic
-
-        self.data_ur = nextcord.ui.TextInput(
-            label="Data urodzenia [IC]",
-            placeholder="np. 15/06/1998",
-            required=True, max_length=20,
+            required=True, max_length=150,
         )
         self.doswiadczenie = nextcord.ui.TextInput(
-            label="Doświadczenie jako funkcjonariusz (min. 30 słów IC)",
-            placeholder="Opisz swoje doświadczenie...",
+            label="Doświadczenie jako funkcjonariusz policji? [IC]",
+            placeholder="Opisz swoje doświadczenie w formie IC...",
             style=nextcord.TextInputStyle.paragraph,
             required=True, max_length=1000,
         )
-        self.karany = nextcord.ui.TextInput(
-            label="Czy byłeś karany w ciągu ostatnich 2 tygodni?",
-            placeholder="Tak / Nie — jeśli tak, opisz krótko",
-            required=True, max_length=200,
-        )
-        self.add_item(self.data_ur)
-        self.add_item(self.doswiadczenie)
-        self.add_item(self.karany)
-
-    async def callback(self, interaction: nextcord.Interaction):
-        await interaction.response.send_modal(PodanieModal3(
-            nick=self._nick, plec=self._plec, wiek=self._wiek,
-            mutacje=self._mutacje, imie_ic=self._imie_ic,
-            data_ur=self.data_ur.value,
-            doswiadczenie=self.doswiadczenie.value,
-            karany=self.karany.value,
-        ))
-
-class PodanieModal3(nextcord.ui.Modal):
-    def __init__(self, nick, plec, wiek, mutacje, imie_ic, data_ur, doswiadczenie, karany):
-        super().__init__(title="📋 Podanie do LSPD — część 3/3", timeout=600)
-        self._nick         = nick
-        self._plec         = plec
-        self._wiek         = wiek
-        self._mutacje      = mutacje
-        self._imie_ic      = imie_ic
-        self._data_ur      = data_ur
-        self._doswiadczenie = doswiadczenie
-        self._karany       = karany
-
         self.dlaczego = nextcord.ui.TextInput(
-            label="Dlaczego powinieneś zostać przyjęty? (min. 60 słów IC)",
-            placeholder="Przekonaj nas...",
+            label="Dlaczego powinniśmy cię przyjąć? [IC]",
+            placeholder="Przekonaj nas w formie IC...",
             style=nextcord.TextInputStyle.paragraph,
             required=True, max_length=2000,
         )
-        self.zlota_rybka = nextcord.ui.TextInput(
-            label="Złapałeś złotą rybkę — jakie masz życzenie?",
-            placeholder="Badam twoją kreatywność :)",
+        self.rp_exp = nextcord.ui.TextInput(
+            label="Doświadczenie w RP — serwery itp. [OOC]",
+            placeholder="Na jakich serwerach grałeś? Jakie masz doświadczenie w RP?",
             style=nextcord.TextInputStyle.paragraph,
-            required=True, max_length=500,
+            required=True, max_length=1000,
         )
+        self.add_item(self.wiek)
+        self.add_item(self.mutacje)
+        self.add_item(self.doswiadczenie)
         self.add_item(self.dlaczego)
-        self.add_item(self.zlota_rybka)
+        self.add_item(self.rp_exp)
 
     async def callback(self, interaction: nextcord.Interaction):
         channel = interaction.guild.get_channel(PODANIE_WYNIKI_CHANNEL_ID)
@@ -1631,20 +1559,14 @@ class PodanieModal3(nextcord.ui.Modal):
             color=0x1e5fc4,
             timestamp=datetime.utcnow()
         )
-        embed.add_field(name="🔖 Nick Discord",          value=self._nick,           inline=True)
-        embed.add_field(name="⚧ Płeć",                  value=self._plec,           inline=True)
-        embed.add_field(name="🎂 Wiek [OOC]",            value=self._wiek,           inline=True)
-        embed.add_field(name="🧬 Mutacje",               value=self._mutacje,        inline=True)
-        embed.add_field(name="👤 Imię i nazwisko [IC]",  value=self._imie_ic,        inline=True)
-        embed.add_field(name="📅 Data urodzenia [IC]",   value=self._data_ur,        inline=True)
-        embed.add_field(name="🏛️ Doświadczenie jako funkcjonariusz",
-                        value=self._doswiadczenie, inline=False)
-        embed.add_field(name="⚖️ Karany w ostatnich 2 tygodniach?",
-                        value=self._karany,        inline=False)
-        embed.add_field(name="💬 Dlaczego powinieneś zostać przyjęty?",
-                        value=self.dlaczego.value, inline=False)
-        embed.add_field(name="🐟 Złota rybka — życzenie",
-                        value=self.zlota_rybka.value, inline=False)
+        embed.add_field(name="🎂 Wiek [OOC]",                       value=self.wiek.value,          inline=True)
+        embed.add_field(name="🧬 Czy posiadasz mutacje?",            value=self.mutacje.value,       inline=True)
+        embed.add_field(name="🏛️ Doświadczenie jako funkcjonariusz [IC]",
+                        value=self.doswiadczenie.value, inline=False)
+        embed.add_field(name="💬 Dlaczego powinieneś zostać przyjęty? [IC]",
+                        value=self.dlaczego.value,     inline=False)
+        embed.add_field(name="🎮 Doświadczenie w RP [OOC]",
+                        value=self.rp_exp.value,       inline=False)
         embed.set_footer(text=f"Składający: {interaction.user.name} • ID: {interaction.user.id}")
 
         await channel.send(embed=embed, view=PodanieDecisionView())
@@ -1652,7 +1574,8 @@ class PodanieModal3(nextcord.ui.Modal):
             "✅ Twoje podanie zostało wysłane! Poczekaj na decyzję rekruterów.",
             ephemeral=True
         )
-        log.info(f"[PODANIE] Złożone przez {interaction.user.name} ({interaction.user.id}) — {self._imie_ic}")
+        log.info(f"[PODANIE] Złożone przez {interaction.user.name} ({interaction.user.id})")
+
 
 class PodaniePanelView(nextcord.ui.View):
     def __init__(self):
@@ -1665,6 +1588,7 @@ class PodaniePanelView(nextcord.ui.View):
     )
     async def podanie_btn(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
         await interaction.response.send_modal(PodanieModal())
+
 
 class PodanieDecisionView(nextcord.ui.View):
     def __init__(self):
@@ -1683,6 +1607,7 @@ class PodanieDecisionView(nextcord.ui.View):
             await interaction.response.send_message("❌ Nie masz uprawnień.", ephemeral=True)
             return
         await interaction.response.send_modal(PodanieRejectModal(interaction.message))
+
 
 class PodanieRejectModal(nextcord.ui.Modal):
     def __init__(self, original_message: nextcord.Message):
@@ -1704,6 +1629,7 @@ class PodanieRejectModal(nextcord.ui.Modal):
             msg=self.original_message
         )
 
+
 async def _handle_podanie_decision(
     interaction: nextcord.Interaction,
     accepted: bool,
@@ -1717,7 +1643,6 @@ async def _handle_podanie_decision(
         await interaction.response.send_message("❌ Nie mogę odczytać danych podania.", ephemeral=True)
         return
 
-    # Pobierz applicant_id ze stopki
     applicant_id = None
     if embed.footer and embed.footer.text:
         try:
@@ -1736,19 +1661,17 @@ async def _handle_podanie_decision(
         new_embed.set_footer(text=f"{embed.footer.text if embed.footer else ''} • Odrzucił: {interaction.user.name}")
         await msg.edit(embed=new_embed, view=None)
         await interaction.response.send_message("❌ Podanie odrzucone.", ephemeral=True)
-
         if member:
             try:
-                dm = f"Twoje podanie do LSPD Vespucci zostało odrzucone"
+                dm = "Twoje podanie do LSPD Vespucci zostało odrzucone"
                 if reason:
                     dm += f" z powodu: {reason}"
                 await member.send(dm)
             except Exception:
                 pass
-        log.info(f"[PODANIE] ❌ Odrzucono: ID={applicant_id} | przez {interaction.user.name} | powód: {reason or '—'}")
+        log.info(f"[PODANIE] ❌ Odrzucono ID={applicant_id} | przez {interaction.user.name} | powód: {reason or '—'}")
         return
 
-    # Akceptacja — nadaj rolę
     role = interaction.guild.get_role(PODANIE_ROLA_ID)
     if role and member:
         try:
@@ -1764,7 +1687,6 @@ async def _handle_podanie_decision(
     new_embed.set_footer(text=f"{embed.footer.text if embed.footer else ''} • Zaakceptował: {interaction.user.name}")
     await msg.edit(embed=new_embed, view=None)
     await interaction.response.send_message("✅ Podanie przyjęte. Rola nadana.", ephemeral=True)
-
     if member:
         try:
             await member.send(
@@ -1773,7 +1695,8 @@ async def _handle_podanie_decision(
             )
         except Exception:
             pass
-    log.info(f"[PODANIE] ✅ Przyjęto: ID={applicant_id} ({member.name if member else '?'}) | przez {interaction.user.name}")
+    log.info(f"[PODANIE] ✅ Przyjęto ID={applicant_id} ({member.name if member else '?'}) | przez {interaction.user.name}")
+
 
 # ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
 TICKET_CHANNEL_ID = 1474113895990952117
