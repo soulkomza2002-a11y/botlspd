@@ -1349,7 +1349,48 @@ class LSPDCog(commands.Cog):
         await channel.send(embed=embed, view=TicketSelectView())
         await interaction.response.send_message(f"✅ Panel ticketów wysłany na {channel.mention}.", ephemeral=True)
 
-    @slash_command(name="urlop-setup", description="Wysyła panel urlopowy na kanał", guild_ids=[GUILD_ID])
+    @slash_command(name="urlop-test-expire", description="Wymuś natychmiastowe sprawdzenie wygasłych urlopów", guild_ids=[GUILD_ID])
+    async def cmd_urlop_test_expire(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        # Pobierz stan PRZED
+        record = await fetch_full_record()
+        officers = record.get("officers", []) if record else []
+        on_leave_before = [(o.get("name"), o.get("leaveEndDate")) for o in officers if o.get("onLeave")]
+
+        # Odpal sprawdzenie
+        await leave_expiry_watch()
+
+        # Pobierz stan PO
+        record2 = await fetch_full_record()
+        officers2 = record2.get("officers", []) if record2 else []
+        on_leave_after = [o.get("name") for o in officers2 if o.get("onLeave")]
+
+        expired = [name for name, _ in on_leave_before if name not in on_leave_after]
+        still_on = [(name, date) for name, date in on_leave_before if name in on_leave_after]
+
+        lines = ["**🧪 Test wygaśnięcia urlopów**\n"]
+        lines.append(f"**Przed:** {len(on_leave_before)} na urlopie")
+        if on_leave_before:
+            for name, date in on_leave_before:
+                lines.append(f"  • {name} — do `{date}`")
+        lines.append(f"\n**Po sprawdzeniu:**")
+        if expired:
+            lines.append(f"✅ Urlop wygasł i zdjęty: **{', '.join(expired)}**")
+        if still_on:
+            for name, date in still_on:
+                lines.append(f"⏳ Nadal na urlopie: **{name}** (do `{date}`)")
+        if not expired and not on_leave_before:
+            lines.append("ℹ️ Nikt nie był na urlopie.")
+        if not expired and on_leave_before:
+            lines.append("ℹ️ Żaden urlop jeszcze nie wygasł (daty w przyszłości).")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
     async def cmd_urlop_setup(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
