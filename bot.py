@@ -1863,24 +1863,24 @@ class PodanieModal(nextcord.ui.Modal):
             required=True, max_length=10,
         )
         self.mutacje = nextcord.ui.TextInput(
-            label="Czy posiadasz mutacje?",
+            label="Mutacje? [OOC]",
             placeholder="Tak / Nie — jeśli tak, jakie?",
             required=True, max_length=150,
         )
         self.doswiadczenie = nextcord.ui.TextInput(
-            label="Doświadczenie jako funkcjonariusz policji? [IC]",
+            label="Doświadczenie jako policjant [IC]",
             placeholder="Opisz swoje doświadczenie w formie IC...",
             style=nextcord.TextInputStyle.paragraph,
             required=True, max_length=1000,
         )
         self.dlaczego = nextcord.ui.TextInput(
-            label="Dlaczego powinniśmy cię przyjąć? [IC]",
+            label="Dlaczego powinieneś być przyjęty? [IC]",
             placeholder="Przekonaj nas w formie IC...",
             style=nextcord.TextInputStyle.paragraph,
             required=True, max_length=2000,
         )
         self.rp_exp = nextcord.ui.TextInput(
-            label="Doświadczenie w RP — serwery itp. [OOC]",
+            label="Doświadczenie RP [OOC]",
             placeholder="Na jakich serwerach grałeś? Jakie masz doświadczenie w RP?",
             style=nextcord.TextInputStyle.paragraph,
             required=True, max_length=1000,
