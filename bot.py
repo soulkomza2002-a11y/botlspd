@@ -2267,6 +2267,227 @@ async def on_member_join(member: nextcord.Member):
     await channel.send(embed=embed)
     await update_status()
 
+# ─── SZKOLENIA FTD ────────────────────────────────────────────────────────────
+SZKOLENIA_CHANNEL_ID = 1477376597974581480
+
+# Lista szkoleń i odpowiadające im klucze w bazie oficerów
+FTD_TRAININGS = [
+    ("SEU", "seu"),
+    ("SV",  "sv"),
+    ("NT",  "nt"),
+    ("PWC", "pwc"),
+    ("WU",  "wu"),
+    ("K9",  "k9"),
+    ("ASU", "asu"),
+]
+
+class SzkoleniaSelectView(nextcord.ui.View):
+    """Stała wiadomość z menu wyboru szkolenia — persist po restarcie."""
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(SzkoleniSelect())
+
+class SzkoleniSelect(nextcord.ui.Select):
+    def __init__(self):
+        options = [
+            nextcord.SelectOption(label=name, value=key, emoji="🎓")
+            for name, key in FTD_TRAININGS
+        ]
+        super().__init__(
+            placeholder="📋 Wybierz szkolenie...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="szkolenia_select_menu",
+        )
+
+    async def callback(self, interaction: nextcord.Interaction):
+        training_key  = self.values[0]
+        training_name = next((n for n, k in FTD_TRAININGS if k == training_key), training_key.upper())
+        modal = SzkoleniaFormModal(training_name, training_key)
+        await interaction.response.send_modal(modal)
+
+
+class SzkoleniaFormModal(nextcord.ui.Modal):
+    def __init__(self, training_name: str, training_key: str):
+        super().__init__(title=f"Szkolenie: {training_name}", timeout=300)
+        self.training_name = training_name
+        self.training_key  = training_key
+
+        self.zdajacy = nextcord.ui.TextInput(
+            label="Imię i nazwisko zdającego",
+            placeholder="np. Jan Kowalski",
+            required=True,
+            max_length=80,
+            custom_id="szkolenie_zdajacy",
+        )
+        self.szkoleniowiec = nextcord.ui.TextInput(
+            label="Imię i nazwisko szkoleniowca",
+            placeholder="np. Anna Nowak",
+            required=True,
+            max_length=80,
+            custom_id="szkolenie_szkoleniowiec",
+        )
+        self.add_item(self.zdajacy)
+        self.add_item(self.szkoleniowiec)
+
+    async def callback(self, interaction: nextcord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        zdajacy_name      = self.zdajacy.value.strip()
+        szkoleniowiec_name = self.szkoleniowiec.value.strip()
+        guild             = interaction.guild
+
+        # Szukaj szkoleniowca po nazwie na Discordzie (nick zawiera imię i nazwisko)
+        officers = await fetch_officers()
+        nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
+        # nick_to_member uzupełniony o display_name
+        display_to_member = {m.display_name.lower(): m for m in guild.members if not m.bot}
+
+        # Znajdź oficera-szkoleniowca po imieniu w bazie
+        trainer_officer = next(
+            (o for o in officers
+             if (o.get("name") or "").strip().lower() == szkoleniowiec_name.lower()),
+            None
+        )
+        trainer_member = None
+        if trainer_officer:
+            nick = (trainer_officer.get("nick") or "").strip().lower()
+            trainer_member = nick_to_member.get(nick) or display_to_member.get(nick)
+
+        if not trainer_member:
+            # fallback: szukaj po display_name bezpośrednio
+            trainer_member = display_to_member.get(szkoleniowiec_name.lower())
+
+        if not trainer_member:
+            await interaction.followup.send(
+                f"❌ Nie znaleziono szkoleniowca **{szkoleniowiec_name}** na Discordzie.\n"
+                f"Upewnij się, że imię i nazwisko jest poprawne i że szkoleniowiec jest na serwerze.",
+                ephemeral=True
+            )
+            return
+
+        # Wyślij DM do szkoleniowca z przyciskami Tak/Nie
+        try:
+            view = SzkoleniaDecisionView(
+                zdajacy_name=zdajacy_name,
+                szkoleniowiec_name=szkoleniowiec_name,
+                training_name=self.training_name,
+                training_key=self.training_key,
+            )
+            embed = nextcord.Embed(
+                title="🎓 Potwierdzenie szkolenia",
+                description=(
+                    f"Siemka, tu Jarvis. Upewniam się czy pan **{zdajacy_name}** zdał szkolenie **{self.training_name}**?"
+                ),
+                color=0x1e5fc4,
+                timestamp=datetime.utcnow()
+            )
+            embed.set_footer(text="LSPD FTD — System Szkoleń")
+            await trainer_member.send(embed=embed, view=view)
+            await interaction.followup.send(
+                f"✅ Wysłano zapytanie do szkoleniowca **{szkoleniowiec_name}**.",
+                ephemeral=True
+            )
+            log.info(f"[SZKOLENIA] Zapytanie do {szkoleniowiec_name} o szkolenie {self.training_name} dla {zdajacy_name}")
+        except nextcord.Forbidden:
+            await interaction.followup.send(
+                f"❌ Nie mogę wysłać DM do **{szkoleniowiec_name}** — ma wyłączone wiadomości prywatne.",
+                ephemeral=True
+            )
+        except Exception as e:
+            log.error(f"[SZKOLENIA] Błąd DM: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Błąd: {e}", ephemeral=True)
+
+
+class SzkoleniaDecisionView(nextcord.ui.View):
+    """Przyciski Tak/Nie wysyłane do szkoleniowca w DM."""
+    def __init__(self, zdajacy_name: str, szkoleniowiec_name: str,
+                 training_name: str, training_key: str):
+        super().__init__(timeout=86400)  # 24h timeout
+        self.zdajacy_name       = zdajacy_name
+        self.szkoleniowiec_name = szkoleniowiec_name
+        self.training_name      = training_name
+        self.training_key       = training_key
+
+    async def _disable_all(self, message):
+        for item in self.children:
+            item.disabled = True
+        try:
+            await message.edit(view=self)
+        except Exception:
+            pass
+
+    @nextcord.ui.button(label="✅ Tak", style=nextcord.ButtonStyle.success, custom_id="szkolenie_tak")
+    async def btn_tak(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await interaction.response.defer()
+        await self._disable_all(interaction.message)
+
+        # Znajdź oficera w bazie i zaktualizuj szkolenie
+        officers = await fetch_officers()
+        officer = next(
+            (o for o in officers
+             if (o.get("name") or "").strip().lower() == self.zdajacy_name.lower()),
+            None
+        )
+        if not officer:
+            await interaction.followup.send(
+                f"❌ Nie znaleziono oficera **{self.zdajacy_name}** w bazie danych!",
+                ephemeral=False
+            )
+            return
+
+        success = await update_officer(officer["id"], {self.training_key: True})
+        if success:
+            await interaction.followup.send(
+                f"✅ Zatwierdzone! **{self.zdajacy_name}** został oznaczony jako posiadający szkolenie **{self.training_name}** w bazie.",
+            )
+            log.info(f"[SZKOLENIA] {self.zdajacy_name} zaliczył {self.training_name} — potwierdził {self.szkoleniowiec_name}")
+        else:
+            await interaction.followup.send(
+                f"❌ Błąd zapisu do bazy danych. Spróbuj ponownie lub zaktualizuj ręcznie.",
+            )
+
+    @nextcord.ui.button(label="❌ Nie", style=nextcord.ButtonStyle.danger, custom_id="szkolenie_nie")
+    async def btn_nie(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await interaction.response.defer()
+        await self._disable_all(interaction.message)
+        await interaction.followup.send(
+            f"❌ Odrzucono. **{self.zdajacy_name}** nie zaliczył szkolenia **{self.training_name}**.",
+        )
+        log.info(f"[SZKOLENIA] {self.zdajacy_name} NIE zaliczył {self.training_name} — potwierdził {self.szkoleniowiec_name}")
+
+
+# Komenda slash do wysłania panelu szkoleń na kanał
+@bot.slash_command(guild_ids=[GUILD_ID], name="szkolen_panel", description="Wyślij panel szkoleń FTD na kanał")
+async def szkolen_panel(interaction: nextcord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Brak uprawnień.", ephemeral=True)
+        return
+
+    channel = interaction.guild.get_channel(SZKOLENIA_CHANNEL_ID)
+    if not channel:
+        await interaction.response.send_message(f"❌ Kanał {SZKOLENIA_CHANNEL_ID} nie znaleziony.", ephemeral=True)
+        return
+
+    embed = nextcord.Embed(
+        title="🎓 System Szkoleń FTD",
+        description=(
+            "Wybierz szkolenie z listy poniżej, aby zarejestrować jego zaliczenie.\n\n"
+            "**Dostępne szkolenia:**\n"
+            + "\n".join(f"• **{name}**" for name, _ in FTD_TRAININGS) +
+            "\n\nPo wybraniu szkolenia wypełnij formularz z imieniem i nazwiskiem zdającego oraz szkoleniowca."
+        ),
+        color=0x1e5fc4,
+        timestamp=datetime.utcnow()
+    )
+    embed.set_footer(text="LSPD FTD — System Szkoleń")
+
+    view = SzkoleniaSelectView()
+    await channel.send(embed=embed, view=view)
+    await interaction.response.send_message(f"✅ Panel wysłany na {channel.mention}", ephemeral=True)
+
+
 # ─── ON READY ─────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
@@ -2279,6 +2500,7 @@ async def on_ready():
     bot.add_view(UrlopEdycjaDecisionView())
     bot.add_view(PodaniePanelView())
     bot.add_view(PodanieDecisionView())
+    bot.add_view(SzkoleniaSelectView())
     if not auto_sync.is_running():
         auto_sync.start()
     if not iad_akta_watch.is_running():
