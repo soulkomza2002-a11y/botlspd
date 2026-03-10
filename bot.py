@@ -293,21 +293,36 @@ RANK_ORDER_BOT = [
 # Bot co minutę sprawdza czy ktoś ma tę flagę, wysyła embed z member.mention
 # i czyści flagę żeby nie wysłać drugi raz.
 
+# Zbiór ID oficerów, które są aktualnie przetwarzane — zapobiega podwójnemu wysłaniu
+# jeśli bot sprawdzi Supabase zanim zdąży wyczyścić flagę z poprzedniego cyklu.
+_pending_in_progress: set = set()
+
 async def process_pending_announces(guild: nextcord.Guild):
+    global _pending_in_progress
+
     record = await fetch_full_record()
     if not record:
         return
     officers = record.get("officers", [])
 
-    pending = [o for o in officers if o.get("pendingAnnounce")]
+    # Filtruj tylko tych, którzy mają flagę I nie są już przetwarzani w tym cyklu
+    pending = [
+        o for o in officers
+        if o.get("pendingAnnounce") and o.get("id") not in _pending_in_progress
+    ]
     if not pending:
         return
 
     log.info(f"[ANNOUNCE] Znaleziono {len(pending)} oczekujących ogłoszeń")
 
+    # Zablokuj te ID natychmiast — zanim cokolwiek wyślemy
+    newly_processing = {o["id"] for o in pending}
+    _pending_in_progress |= newly_processing
+
     # Mapa nick → member
     nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
-    dirty = False
+
+    sent_ids = set()
 
     for officer in pending:
         ann       = officer["pendingAnnounce"]
@@ -316,14 +331,14 @@ async def process_pending_announces(guild: nextcord.Guild):
         old_badge = ann.get("oldBadge", "")
         new_badge = ann.get("newBadge", "")
         ann_type  = ann.get("type", "AWANS")
+        reason    = ann.get("reason", "").strip()
 
         is_promotion = ann_type == "AWANS"
         channel_id   = AWANS_CHANNEL_ID if is_promotion else DEGRADACJA_CHANNEL_ID
         channel      = guild.get_channel(channel_id)
         if not channel:
             log.warning(f"[ANNOUNCE] Kanał {channel_id} nie znaleziony!")
-            officer.pop("pendingAnnounce", None)
-            dirty = True
+            sent_ids.add(officer["id"])
             continue
 
         name  = officer.get("name", "—")
@@ -332,7 +347,6 @@ async def process_pending_announces(guild: nextcord.Guild):
         emoji = "⬆️" if is_promotion else "⬇️"
         label = "AWANS" if is_promotion else "DEGRADACJA"
 
-        # Prawdziwy Discord mention przez member.mention
         member = nick_to_member.get(nick)
         ping   = member.mention if member else f"@{officer.get('nick', name)}"
 
@@ -343,13 +357,15 @@ async def process_pending_announces(guild: nextcord.Guild):
         )
         embed.add_field(name="👤 Funkcjonariusz",    value=name or "—",                              inline=True)
         embed.add_field(name="🔖 Nick OOC",          value=officer.get("nick") or "—",               inline=True)
-        embed.add_field(name="​",               value="​",                                  inline=True)
+        embed.add_field(name="\u200b",               value="\u200b",                                  inline=True)
         embed.add_field(name="📉 Poprzedni stopień", value=old_rank,                                  inline=True)
         embed.add_field(name="📈 Nowy stopień",      value=new_rank,                                  inline=True)
-        embed.add_field(name="​",               value="​",                                  inline=True)
+        embed.add_field(name="\u200b",               value="\u200b",                                  inline=True)
         embed.add_field(name="🪪 Stara odznaka",     value=f"#{old_badge}" if old_badge else "—",    inline=True)
         embed.add_field(name="🆕 Nowa odznaka",      value=f"#{new_badge}" if new_badge else "—",    inline=True)
-        embed.add_field(name="​",               value="​",                                  inline=True)
+        embed.add_field(name="\u200b",               value="\u200b",                                  inline=True)
+        if reason:
+            embed.add_field(name="📝 Powód",         value=reason,                                    inline=False)
         embed.set_footer(text="LSPD — System zarządzania")
 
         try:
@@ -358,22 +374,29 @@ async def process_pending_announces(guild: nextcord.Guild):
         except Exception as e:
             log.error(f"[ANNOUNCE] ❌ Błąd wysyłania: {e}")
 
-        # Wyczyść flagę niezależnie od sukcesu — żeby nie spamować
-        officer.pop("pendingAnnounce", None)
-        dirty = True
+        # Oznacz jako wysłane niezależnie od sukcesu — żeby nie spamować
+        sent_ids.add(officer["id"])
 
-    if dirty:
-        # Bezpieczny zapis — pobierz świeży rekord i nałóż tylko usunięcie pendingAnnounce
+    if sent_ids:
+        # Pobierz ŚWIEŻY rekord i wyczyść tylko flagi już wysłanych
         fresh = await fetch_full_record()
         if fresh:
             fresh_officers = fresh.get("officers", [])
+            cleared = 0
             for fo in fresh_officers:
-                fo.pop("pendingAnnounce", None)
+                if fo.get("id") in sent_ids and fo.get("pendingAnnounce"):
+                    fo.pop("pendingAnnounce", None)
+                    cleared += 1
             ok = await save_full_record({"officers": fresh_officers})
             if ok:
-                log.info(f"[ANNOUNCE] Wyczyszczono pendingAnnounce dla {len(pending)} oficerów")
+                log.info(f"[ANNOUNCE] Wyczyszczono pendingAnnounce dla {cleared} oficerów")
             else:
                 log.error("[ANNOUNCE] Błąd zapisu po wyczyszczeniu pendingAnnounce")
+        else:
+            log.error("[ANNOUNCE] Nie udało się pobrać świeżego rekordu — flagi nie wyczyszczone")
+
+        # Zwolnij blokadę dopiero po udanym zapisie
+        _pending_in_progress -= sent_ids
 
 # ─── SYNC LOGIC ───────────────────────────────────────────────────────────────
 async def sync_roles(guild: nextcord.Guild) -> dict:
