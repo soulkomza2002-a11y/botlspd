@@ -280,12 +280,12 @@ def build_nickname(officer: dict) -> str:
 def officer_map_from(officers: list) -> dict:
     return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
 
-# ─── OGŁOSZENIA AWANSÓW / DEGRADACJI ─────────────────────────────────────────
+# ─── KOLEJNOŚĆ STOPNI (Cadet = najniższy, Chief = najwyższy) ─────────────────
 RANK_ORDER = [
-    "Chief of Police", "Assistant Chief", "Deputy Chief", "Commander",
-    "Captain", "Lieutenant II", "Lieutenant I", "Master Sergeant",
-    "Staff Sergeant", "Sergeant", "Officer III+1", "Officer III",
-    "Officer II", "Officer I", "Cadet"
+    "Cadet", "Officer I", "Officer II", "Officer III", "Officer III+1",
+    "Sergeant", "Staff Sergeant", "Master Sergeant",
+    "Lieutenant I", "Lieutenant II",
+    "Captain", "Commander", "Deputy Chief", "Assistant Chief", "Chief of Police"
 ]
 
 async def announce_rank_change(
@@ -293,15 +293,16 @@ async def announce_rank_change(
     officer: dict,
     old_rank: str,
     new_rank: str,
-    badge: str
+    old_badge: str,
+    new_badge: str,
 ):
-    """Wysyła embed na kanał awansów lub degradacji."""
+    """Wysyła embed na kanał awansów lub degradacji i oznacza osobę."""
     old_idx = RANK_ORDER.index(old_rank) if old_rank in RANK_ORDER else -1
     new_idx = RANK_ORDER.index(new_rank) if new_rank in RANK_ORDER else -1
-    if old_idx == -1 or new_idx == -1:
+    if old_idx == -1 or new_idx == -1 or old_idx == new_idx:
         return
 
-    is_promotion = new_idx < old_idx  # niższy indeks = wyższy stopień
+    is_promotion = new_idx > old_idx   # wyższy index = wyższy stopień
     channel_id   = AWANS_CHANNEL_ID if is_promotion else DEGRADACJA_CHANNEL_ID
     channel      = guild.get_channel(channel_id)
     if not channel:
@@ -309,23 +310,34 @@ async def announce_rank_change(
         return
 
     name  = officer.get("name", "—")
-    nick  = officer.get("nick", "—")
+    nick  = (officer.get("nick") or "").strip().lower()
     color = 0x2ecc71 if is_promotion else 0xe74c3c
     emoji = "⬆️" if is_promotion else "⬇️"
-    title = f"{emoji} {'AWANS' if is_promotion else 'DEGRADACJA'} — {name}"
+    label = "AWANS" if is_promotion else "DEGRADACJA"
 
-    embed = nextcord.Embed(title=title, color=color, timestamp=datetime.utcnow())
-    embed.add_field(name="👤 Funkcjonariusz",    value=name or "—",     inline=True)
-    embed.add_field(name="🔖 Nick OOC",          value=nick or "—",     inline=True)
-    embed.add_field(name="\u200b",               value="\u200b",        inline=True)
-    embed.add_field(name="📉 Poprzedni stopień", value=old_rank or "—", inline=True)
-    embed.add_field(name="📈 Nowy stopień",      value=new_rank or "—", inline=True)
-    embed.add_field(name="🪪 Odznaka",           value=f"#{badge}" if badge else "—", inline=True)
+    # Spróbuj oznaczyć osobę po nicku Discord
+    member = next((m for m in guild.members if not m.bot and m.name.lower() == nick), None)
+    ping   = member.mention if member else f"@{officer.get('nick','—')}"
+
+    embed = nextcord.Embed(
+        title=f"{emoji} {label} — {name}",
+        color=color,
+        timestamp=datetime.utcnow()
+    )
+    embed.add_field(name="👤 Funkcjonariusz",    value=name or "—",                              inline=True)
+    embed.add_field(name="🔖 Nick OOC",          value=officer.get("nick") or "—",               inline=True)
+    embed.add_field(name="​",               value="​",                                  inline=True)
+    embed.add_field(name="📉 Poprzedni stopień", value=old_rank or "—",                          inline=True)
+    embed.add_field(name="📈 Nowy stopień",      value=new_rank or "—",                          inline=True)
+    embed.add_field(name="​",               value="​",                                  inline=True)
+    embed.add_field(name="🪪 Stara odznaka",     value=f"#{old_badge}" if old_badge else "—",    inline=True)
+    embed.add_field(name="🆕 Nowa odznaka",      value=f"#{new_badge}" if new_badge else "—",    inline=True)
+    embed.add_field(name="​",               value="​",                                  inline=True)
     embed.set_footer(text="LSPD — Bot Sync")
 
     try:
-        await channel.send(embed=embed)
-        log.info(f"[ANNOUNCE] {'Awans' if is_promotion else 'Degradacja'}: {name} {old_rank} → {new_rank}")
+        await channel.send(content=ping, embed=embed)
+        log.info(f"[ANNOUNCE] {label}: {name} {old_rank}→{new_rank} | #{old_badge}→#{new_badge}")
     except nextcord.Forbidden:
         log.error(f"[ANNOUNCE] Brak uprawnień do kanału {channel_id}")
     except Exception as e:
@@ -433,16 +445,20 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                 changes.append(f"odznaka→#{new_badge}")
 
             if not rank_ok:
-                old_rank = next((r.name for r in current_lspd), None)
+                old_rank_name = next((r.name for r in current_lspd), None)
                 if rank_to_remove:
                     await member.remove_roles(*rank_to_remove, reason="LSPD Bot sync")
                 if not has_target and target_role:
                     await member.add_roles(target_role, reason="LSPD Bot sync")
                 changes.append(f"stopień→{target_role_name}")
-                # ── Ogłoszenie awansu / degradacji ─────────────────────────
-                if old_rank and target_role_name and old_rank != target_role_name:
+                # Ogłoszenie awansu / degradacji
+                if old_rank_name and target_role_name and old_rank_name != target_role_name:
                     await announce_rank_change(
-                        guild, officer, old_rank, target_role_name, new_badge if badge_changed else current_badge
+                        guild, officer,
+                        old_rank=old_rank_name,
+                        new_rank=target_role_name,
+                        old_badge=current_badge,
+                        new_badge=new_badge if badge_changed else current_badge
                     )
 
             if not units_ok:
