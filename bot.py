@@ -1413,9 +1413,9 @@ class LSPDCog(commands.Cog):
                 "Wypełnij podanie klikając przycisk poniżej. Formularz składa się z **3 kroków** — "
                 "odpowiedz na wszystkie pytania rzetelnie i zgodnie z prawdą.\n\n"
                 "**Wymagania:**\n"
-                "• Minimum **18 lat** [OOC]\n"
-                "• Znajomość zasad serwera\n"
-                "• Odpowiedź na pytania o min. **30/60 słów** w formie IC\n\n"
+                "• Minimum **16 lat** [OOC]\n"
+                "• Mutacja\n"
+                "• Zaangażowanie i dobre chęci\n\n"
                 "*Podanie zostanie rozpatrzone przez rekruterów LSPD.*"
             ),
             color=0x1e5fc4,
