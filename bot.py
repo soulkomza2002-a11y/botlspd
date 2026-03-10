@@ -644,6 +644,270 @@ async def announce_watch():
 async def before_announce_watch():
     await bot.wait_until_ready()
 
+# ─── SYSTEM URLOPOWY ──────────────────────────────────────────────────────────
+URLOP_PANEL_CHANNEL_ID   = 1480776929077497897   # kanał z guzikiem
+URLOP_WNIOSKI_CHANNEL_ID = 1480776372170522694   # kanał z wnioskami do akceptacji
+
+# Modal z formularzem urlopowym
+class UrlopModal(nextcord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="📋 Wniosek o urlop", timeout=300)
+
+        self.imie = nextcord.ui.TextInput(
+            label="Imię i Nazwisko (IC)",
+            placeholder="np. John Kowalski",
+            required=True,
+            max_length=100,
+        )
+        self.powod = nextcord.ui.TextInput(
+            label="Powód",
+            placeholder="Podaj powód urlopu...",
+            style=nextcord.TextInputStyle.paragraph,
+            required=True,
+            max_length=500,
+        )
+        self.start = nextcord.ui.TextInput(
+            label="Rozpoczęcie [dzień/miesiąc/rok]",
+            placeholder="np. 15/06/2025",
+            required=True,
+            max_length=20,
+        )
+        self.end = nextcord.ui.TextInput(
+            label="Zakończenie [dzień/miesiąc/rok]",
+            placeholder="np. 22/06/2025",
+            required=True,
+            max_length=20,
+        )
+
+        self.add_item(self.imie)
+        self.add_item(self.powod)
+        self.add_item(self.start)
+        self.add_item(self.end)
+
+    async def callback(self, interaction: nextcord.Interaction):
+        channel = interaction.guild.get_channel(URLOP_WNIOSKI_CHANNEL_ID)
+        if not channel:
+            await interaction.response.send_message("❌ Nie znaleziono kanału wniosków.", ephemeral=True)
+            return
+
+        embed = nextcord.Embed(
+            title="🏖️ WNIOSEK O URLOP",
+            color=0x3498db,
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="👤 Imię i Nazwisko",      value=self.imie.value,  inline=True)
+        embed.add_field(name="🔖 Nick OOC",             value=interaction.user.mention, inline=True)
+        embed.add_field(name="\u200b",                  value="\u200b",         inline=True)
+        embed.add_field(name="📋 Powód",                value=self.powod.value, inline=False)
+        embed.add_field(name="📅 Rozpoczęcie",          value=self.start.value, inline=True)
+        embed.add_field(name="📅 Zakończenie",          value=self.end.value,   inline=True)
+        embed.set_footer(text=f"Złożony przez: {interaction.user.name} • ID: {interaction.user.id}")
+
+        msg = await channel.send(
+            embed=embed,
+            view=UrlopDecisionView(
+                officer_name=self.imie.value,
+                end_date_str=self.end.value,
+                applicant_id=interaction.user.id,
+            )
+        )
+        await msg.add_reaction("✅")
+        await msg.add_reaction("❌")
+
+        await interaction.response.send_message(
+            "✅ Twój wniosek o urlop został złożony! Poczekaj na decyzję przełożonych.",
+            ephemeral=True
+        )
+        log.info(f"[URLOP] Wniosek złożony: {self.imie.value} ({interaction.user.name}) | {self.start.value} — {self.end.value}")
+
+# Widok panelu z guzikiem "Wniosek o urlop"
+class UrlopPanelView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @nextcord.ui.button(
+        label="🏖️  Wniosek o urlop",
+        style=nextcord.ButtonStyle.primary,
+        custom_id="urlop_wniosek_btn"
+    )
+    async def urlop_btn(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await interaction.response.send_modal(UrlopModal())
+
+# Widok z przyciskami akceptacji/odrzucenia na kanale wniosków
+class UrlopDecisionView(nextcord.ui.View):
+    def __init__(self, officer_name: str = "", end_date_str: str = "", applicant_id: int = 0):
+        super().__init__(timeout=None)
+        self.officer_name  = officer_name
+        self.end_date_str  = end_date_str
+        self.applicant_id  = applicant_id
+
+    def _encode_custom_id(self, action: str) -> str:
+        # Kodujemy dane w custom_id żeby przeżyć restart bota
+        # Format: urlop_{action}_{applicant_id}_{end_date_escaped}_{officer_name_escaped}
+        safe_name = self.officer_name.replace("|", " ")
+        safe_date = self.end_date_str.replace("|", "-")
+        return f"urlop_{action}_{self.applicant_id}|{safe_date}|{safe_name}"
+
+    @nextcord.ui.button(label="✅ Akceptuj", style=nextcord.ButtonStyle.success, custom_id="urlop_accept_placeholder")
+    async def accept_btn(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await _handle_urlop_decision(interaction, accepted=True)
+
+    @nextcord.ui.button(label="❌ Odrzuć", style=nextcord.ButtonStyle.danger, custom_id="urlop_reject_placeholder")
+    async def reject_btn(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await _handle_urlop_decision(interaction, accepted=False)
+
+async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bool):
+    if not interaction.user.guild_permissions.manage_roles:
+        await interaction.response.send_message("❌ Nie masz uprawnień do akceptowania wniosków.", ephemeral=True)
+        return
+
+    # Pobierz dane z embeda wiadomości
+    msg   = interaction.message
+    embed = msg.embeds[0] if msg.embeds else None
+    if not embed:
+        await interaction.response.send_message("❌ Nie mogę odczytać danych wniosku.", ephemeral=True)
+        return
+
+    officer_name = ""
+    end_date_str = ""
+    applicant_id = None
+
+    for field in embed.fields:
+        if "Imię" in field.name:
+            officer_name = field.value.strip()
+        if "Zakończenie" in field.name:
+            end_date_str = field.value.strip()
+
+    # Pobierz applicant_id ze stopki
+    if embed.footer and embed.footer.text:
+        try:
+            id_part = embed.footer.text.split("ID:")[-1].strip()
+            applicant_id = int(id_part)
+        except Exception:
+            pass
+
+    if not accepted:
+        # Odrzucenie — tylko zaktualizuj embed
+        new_embed = embed.copy()
+        new_embed.color = 0xe74c3c
+        new_embed.title = "❌ WNIOSEK ODRZUCONY"
+        new_embed.set_footer(text=f"{embed.footer.text if embed.footer else ''} • Odrzucił: {interaction.user.name}")
+        await msg.edit(embed=new_embed, view=None)
+        await interaction.response.send_message("❌ Wniosek został odrzucony.", ephemeral=True)
+
+        # Powiadom wnioskodawcę
+        if applicant_id:
+            member = interaction.guild.get_member(applicant_id)
+            if member:
+                try:
+                    await member.send(f"❌ Twój wniosek o urlop został **odrzucony** przez {interaction.user.mention}.")
+                except Exception:
+                    pass
+        log.info(f"[URLOP] ❌ Odrzucono wniosek: {officer_name} | {end_date_str} | przez {interaction.user.name}")
+        return
+
+    # Akceptacja — znajdź oficera w bazie i ustaw onLeave=True + leaveEndDate
+    record = await fetch_full_record()
+    if not record:
+        await interaction.response.send_message("❌ Błąd połączenia z bazą danych.", ephemeral=True)
+        return
+
+    officers = record.get("officers", [])
+    officer  = None
+    for o in officers:
+        if (o.get("name") or "").strip().lower() == officer_name.lower():
+            officer = o
+            break
+
+    if not officer:
+        # Spróbuj po nicku OOC jeśli nie znaleziono po imieniu
+        if applicant_id:
+            member = interaction.guild.get_member(applicant_id)
+            if member:
+                nick_lower = member.name.lower()
+                for o in officers:
+                    if (o.get("nick") or "").strip().lower() == nick_lower:
+                        officer = o
+                        break
+
+    if not officer:
+        await interaction.response.send_message(
+            f"⚠️ Nie znaleziono funkcjonariusza **{officer_name}** w bazie.\nZaakceptowano wniosek, ale **nie zmieniono statusu w bazie** — zrób to ręcznie.",
+            ephemeral=True
+        )
+    else:
+        officer["onLeave"]      = True
+        officer["leaveEndDate"] = end_date_str
+        ok = await save_full_record({"officers": officers})
+        if not ok:
+            await interaction.response.send_message("❌ Błąd zapisu do bazy danych.", ephemeral=True)
+            return
+        log.info(f"[URLOP] ✅ Zaakceptowano: {officer_name} | urlop do {end_date_str}")
+
+    # Zaktualizuj embed
+    new_embed = embed.copy()
+    new_embed.color = 0x2ecc71
+    new_embed.title = "✅ WNIOSEK ZAAKCEPTOWANY"
+    new_embed.set_footer(text=f"{embed.footer.text if embed.footer else ''} • Zaakceptował: {interaction.user.name}")
+    await msg.edit(embed=new_embed, view=None)
+    await interaction.response.send_message("✅ Wniosek zaakceptowany. Status funkcjonariusza zaktualizowany.", ephemeral=True)
+
+    # Powiadom wnioskodawcę
+    if applicant_id:
+        member = interaction.guild.get_member(applicant_id)
+        if member:
+            try:
+                await member.send(f"✅ Twój wniosek o urlop został **zaakceptowany** przez {interaction.user.mention}.\nUrlop trwa do: **{end_date_str}**")
+            except Exception:
+                pass
+
+# ─── TASK: AUTOMATYCZNE KOŃCZENIE URLOPÓW ────────────────────────────────────
+def _parse_date(date_str: str):
+    """Parsuje datę w formacie d/m/Y lub dd/mm/yyyy."""
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%-d/%-m/%Y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+@tasks.loop(minutes=30)
+async def leave_expiry_watch():
+    """Co 30 minut sprawdza czy czyiś urlop się skończył i ustawia go z powrotem na aktywny."""
+    record = await fetch_full_record()
+    if not record:
+        return
+    officers  = record.get("officers", [])
+    now       = datetime.utcnow().replace(tzinfo=None)
+    changed   = []
+
+    for o in officers:
+        if not o.get("onLeave"):
+            continue
+        end_str = o.get("leaveEndDate", "").strip()
+        if not end_str:
+            continue
+        end_dt = _parse_date(end_str)
+        if not end_dt:
+            log.warning(f"[URLOP] Nie można sparsować daty '{end_str}' dla {o.get('name')}")
+            continue
+        # Urlop kończy się po tym dniu (włącznie), więc zdejmujemy następnego dnia
+        if now.date() > end_dt.date():
+            o["onLeave"]      = False
+            o["leaveEndDate"] = ""
+            changed.append(o.get("name", "?"))
+
+    if changed:
+        ok = await save_full_record({"officers": officers})
+        if ok:
+            log.info(f"[URLOP] Zakończono urlop dla: {', '.join(changed)}")
+        else:
+            log.error("[URLOP] Błąd zapisu po zakończeniu urlopów")
+
+@leave_expiry_watch.before_loop
+async def before_leave_expiry():
+    await bot.wait_until_ready()
+
 async def update_status():
     guild = bot.get_guild(GUILD_ID)
     if not guild:
@@ -1046,7 +1310,37 @@ class LSPDCog(commands.Cog):
         await channel.send(embed=embed, view=TicketSelectView())
         await interaction.response.send_message(f"✅ Panel ticketów wysłany na {channel.mention}.", ephemeral=True)
 
-    @slash_command(name="iad-test", description="Test wysyłania akty IAD na kanał", guild_ids=[GUILD_ID])
+    @slash_command(name="urlop-setup", description="Wysyła panel urlopowy na kanał", guild_ids=[GUILD_ID])
+    async def cmd_urlop_setup(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
+            return
+
+        channel = interaction.guild.get_channel(URLOP_PANEL_CHANNEL_ID)
+        if not channel:
+            await interaction.response.send_message("❌ Nie znaleziono kanału urlopowego.", ephemeral=True)
+            return
+
+        embed = nextcord.Embed(
+            title="🏖️ SYSTEM URLOPOWY — LSPD",
+            description=(
+                "Planujesz przerwę od służby?\n\n"
+                "Kliknij przycisk poniżej, wypełnij formularz i poczekaj na akceptację przełożonych.\n\n"
+                "**Pamiętaj:**\n"
+                "• Urlop wymaga akceptacji High Command\n"
+                "• Podaj dokładne daty rozpoczęcia i zakończenia\n"
+                "• Status zostanie automatycznie zmieniony po akceptacji\n"
+                "• Po zakończeniu okresu urlop wygasa automatycznie"
+            ),
+            color=0x3498db,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_footer(text="Los Santos Police Department · System Urlopowy")
+
+        await channel.send(embed=embed, view=UrlopPanelView())
+        await interaction.response.send_message(f"✅ Panel urlopowy wysłany na {channel.mention}.", ephemeral=True)
+
+
     async def cmd_iad_test(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ Brak uprawnień.", ephemeral=True)
@@ -1332,12 +1626,16 @@ async def on_ready():
     bot.add_view(TicketSelectView())
     bot.add_view(CloseTicketView())
     bot.add_view(JoinLSPDView())
+    bot.add_view(UrlopPanelView())
+    bot.add_view(UrlopDecisionView())
     if not auto_sync.is_running():
         auto_sync.start()
     if not iad_akta_watch.is_running():
         iad_akta_watch.start()
     if not announce_watch.is_running():
         announce_watch.start()
+    if not leave_expiry_watch.is_running():
+        leave_expiry_watch.start()
     guild = bot.get_guild(GUILD_ID)
     if guild:
         await check_new_akta(guild)
