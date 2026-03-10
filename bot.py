@@ -13,8 +13,10 @@ GUILD_ID            = int(os.getenv("GUILD_ID", "0"))
 SUPABASE_URL        = os.getenv("SUPABASE_URL", "https://gmxooidsxoqifdycqwfd.supabase.co")
 SUPABASE_KEY        = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdteG9vaWRzeG9xaWZkeWNxd2ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE4NjIxODIsImV4cCI6MjA4NzQzODE4Mn0.PhEvMKDx-dA-kmcgTvsXs4lSSRP4VDkaeh1Jf739iHs")
 SYNC_INTERVAL_MIN   = int(os.getenv("SYNC_INTERVAL", "5"))
-LOG_CHANNEL_ID      = 1474443852784992418
-IAD_AKTA_CHANNEL_ID = 1473743212966318140
+LOG_CHANNEL_ID         = 1474443852784992418
+IAD_AKTA_CHANNEL_ID    = 1473743212966318140
+AWANS_CHANNEL_ID       = 1473743256650121308
+DEGRADACJA_CHANNEL_ID  = 1473743274094231734
 
 # ─── MAPOWANIE STOPIEŃ → ROLA ─────────────────────────────────────────────────
 RANK_TO_ROLE = {
@@ -63,7 +65,7 @@ RANK_BADGE_RANGES = {
     "Assistant Chief": (1,   9),
     "Deputy Chief":    (1,   9),
     "Commander":       (1,   9),
-    "Captain":         (10,  19),
+    "Captain":         (6,   19),
     "Lieutenant II":   (20,  29),
     "Lieutenant I":    (30,  39),
     "Master Sergeant": (40,  49),
@@ -278,6 +280,57 @@ def build_nickname(officer: dict) -> str:
 def officer_map_from(officers: list) -> dict:
     return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
 
+# ─── OGŁOSZENIA AWANSÓW / DEGRADACJI ─────────────────────────────────────────
+RANK_ORDER = [
+    "Chief of Police", "Assistant Chief", "Deputy Chief", "Commander",
+    "Captain", "Lieutenant II", "Lieutenant I", "Master Sergeant",
+    "Staff Sergeant", "Sergeant", "Officer III+1", "Officer III",
+    "Officer II", "Officer I", "Cadet"
+]
+
+async def announce_rank_change(
+    guild: nextcord.Guild,
+    officer: dict,
+    old_rank: str,
+    new_rank: str,
+    badge: str
+):
+    """Wysyła embed na kanał awansów lub degradacji."""
+    old_idx = RANK_ORDER.index(old_rank) if old_rank in RANK_ORDER else -1
+    new_idx = RANK_ORDER.index(new_rank) if new_rank in RANK_ORDER else -1
+    if old_idx == -1 or new_idx == -1:
+        return
+
+    is_promotion = new_idx < old_idx  # niższy indeks = wyższy stopień
+    channel_id   = AWANS_CHANNEL_ID if is_promotion else DEGRADACJA_CHANNEL_ID
+    channel      = guild.get_channel(channel_id)
+    if not channel:
+        log.warning(f"[ANNOUNCE] Kanał {channel_id} nie znaleziony!")
+        return
+
+    name  = officer.get("name", "—")
+    nick  = officer.get("nick", "—")
+    color = 0x2ecc71 if is_promotion else 0xe74c3c
+    emoji = "⬆️" if is_promotion else "⬇️"
+    title = f"{emoji} {'AWANS' if is_promotion else 'DEGRADACJA'} — {name}"
+
+    embed = nextcord.Embed(title=title, color=color, timestamp=datetime.utcnow())
+    embed.add_field(name="👤 Funkcjonariusz",    value=name or "—",     inline=True)
+    embed.add_field(name="🔖 Nick OOC",          value=nick or "—",     inline=True)
+    embed.add_field(name="\u200b",               value="\u200b",        inline=True)
+    embed.add_field(name="📉 Poprzedni stopień", value=old_rank or "—", inline=True)
+    embed.add_field(name="📈 Nowy stopień",      value=new_rank or "—", inline=True)
+    embed.add_field(name="🪪 Odznaka",           value=f"#{badge}" if badge else "—", inline=True)
+    embed.set_footer(text="LSPD — Bot Sync")
+
+    try:
+        await channel.send(embed=embed)
+        log.info(f"[ANNOUNCE] {'Awans' if is_promotion else 'Degradacja'}: {name} {old_rank} → {new_rank}")
+    except nextcord.Forbidden:
+        log.error(f"[ANNOUNCE] Brak uprawnień do kanału {channel_id}")
+    except Exception as e:
+        log.error(f"[ANNOUNCE] Błąd: {e}")
+
 # ─── SYNC LOGIC ───────────────────────────────────────────────────────────────
 async def sync_roles(guild: nextcord.Guild) -> dict:
     record = await fetch_full_record()
@@ -380,11 +433,17 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
                 changes.append(f"odznaka→#{new_badge}")
 
             if not rank_ok:
+                old_rank = next((r.name for r in current_lspd), None)
                 if rank_to_remove:
                     await member.remove_roles(*rank_to_remove, reason="LSPD Bot sync")
                 if not has_target and target_role:
                     await member.add_roles(target_role, reason="LSPD Bot sync")
                 changes.append(f"stopień→{target_role_name}")
+                # ── Ogłoszenie awansu / degradacji ─────────────────────────
+                if old_rank and target_role_name and old_rank != target_role_name:
+                    await announce_rank_change(
+                        guild, officer, old_rank, target_role_name, new_badge if badge_changed else current_badge
+                    )
 
             if not units_ok:
                 if units_to_remove:
