@@ -1747,6 +1747,7 @@ class LSPDCog(commands.Cog):
         await channel.send(embed=embed, view=PodaniePanelView())
         await interaction.response.send_message(f"✅ Panel podań wysłany na {channel.mention}.", ephemeral=True)
 
+    @slash_command(name="urlop-setup", description="Wysyła panel urlopowy LSPD", guild_ids=[GUILD_ID])
     async def cmd_urlop_setup(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
