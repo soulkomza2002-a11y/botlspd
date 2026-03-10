@@ -754,20 +754,40 @@ class UrlopDecisionView(nextcord.ui.View):
 
     @nextcord.ui.button(label="❌ Odrzuć", style=nextcord.ButtonStyle.danger, custom_id="urlop_reject_placeholder")
     async def reject_btn(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
-        await _handle_urlop_decision(interaction, accepted=False)
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ Nie masz uprawnień do odrzucania wniosków.", ephemeral=True)
+            return
+        await interaction.response.send_modal(UrlopRejectModal(interaction.message))
 
-async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bool):
+class UrlopRejectModal(nextcord.ui.Modal):
+    def __init__(self, original_message: nextcord.Message):
+        super().__init__(title="❌ Powód odrzucenia wniosku", timeout=300)
+        self.original_message = original_message
+
+        self.reason = nextcord.ui.TextInput(
+            label="Powód odrzucenia",
+            placeholder="Podaj powód odrzucenia wniosku urlopowego...",
+            style=nextcord.TextInputStyle.paragraph,
+            required=True,
+            max_length=500,
+        )
+        self.add_item(self.reason)
+
+    async def callback(self, interaction: nextcord.Interaction):
+        await _handle_urlop_decision(interaction, accepted=False, reason=self.reason.value.strip(), msg=self.original_message)
+
+async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bool, reason: str = "", msg: nextcord.Message = None):
     if not interaction.user.guild_permissions.manage_roles:
         await interaction.response.send_message("❌ Nie masz uprawnień do akceptowania wniosków.", ephemeral=True)
         return
 
-    # Pobierz dane z embeda wiadomości
-    msg   = interaction.message
+    # Użyj przekazanej wiadomości lub pobierz z interaction
+    if msg is None:
+        msg = interaction.message
     embed = msg.embeds[0] if msg.embeds else None
     if not embed:
         await interaction.response.send_message("❌ Nie mogę odczytać danych wniosku.", ephemeral=True)
         return
-
     officer_name = ""
     end_date_str = ""
     applicant_id = None
@@ -787,10 +807,12 @@ async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bo
             pass
 
     if not accepted:
-        # Odrzucenie — tylko zaktualizuj embed
+        # Zaktualizuj embed z powodem odrzucenia
         new_embed = embed.copy()
         new_embed.color = 0xe74c3c
         new_embed.title = "❌ WNIOSEK ODRZUCONY"
+        if reason:
+            new_embed.add_field(name="💬 Powód odrzucenia", value=reason, inline=False)
         new_embed.set_footer(text=f"{embed.footer.text if embed.footer else ''} • Odrzucił: {interaction.user.name}")
         await msg.edit(embed=new_embed, view=None)
         await interaction.response.send_message("❌ Wniosek został odrzucony.", ephemeral=True)
@@ -800,10 +822,13 @@ async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bo
             member = interaction.guild.get_member(applicant_id)
             if member:
                 try:
-                    await member.send(f"❌ Twój wniosek o urlop został **odrzucony** przez {interaction.user.mention}.")
+                    dm_text = f"❌ Twój wniosek o urlop został **odrzucony** przez {interaction.user.mention}."
+                    if reason:
+                        dm_text += f"\n\n**Powód:** {reason}"
+                    await member.send(dm_text)
                 except Exception:
                     pass
-        log.info(f"[URLOP] ❌ Odrzucono wniosek: {officer_name} | {end_date_str} | przez {interaction.user.name}")
+        log.info(f"[URLOP] ❌ Odrzucono wniosek: {officer_name} | {end_date_str} | przez {interaction.user.name} | powód: {reason or '—'}")
         return
 
     # Akceptacja — znajdź oficera w bazie i ustaw onLeave=True + leaveEndDate
@@ -836,6 +861,20 @@ async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bo
             ephemeral=True
         )
     else:
+        # Sprawdź czy data zakończenia nie jest już w przeszłości
+        end_dt = _parse_date(end_date_str)
+        now    = datetime.utcnow()
+        if end_dt and now.date() > end_dt.date():
+            await interaction.response.send_message(
+                f"⚠️ Data zakończenia urlopu (**{end_date_str}**) już minęła — wniosek nieaktualny. Nie zmieniono statusu w bazie.",
+                ephemeral=True
+            )
+            new_embed = embed.copy()
+            new_embed.color = 0xe67e22
+            new_embed.title = "⚠️ WNIOSEK NIEAKTUALNY (data minęła)"
+            new_embed.set_footer(text=f"{embed.footer.text if embed.footer else ''} • Sprawdził: {interaction.user.name}")
+            await msg.edit(embed=new_embed, view=None)
+            return
         officer["onLeave"]      = True
         officer["leaveEndDate"] = end_date_str
         ok = await save_full_record({"officers": officers})
@@ -871,7 +910,7 @@ def _parse_date(date_str: str):
             continue
     return None
 
-@tasks.loop(minutes=30)
+@tasks.loop(minutes=1)
 async def leave_expiry_watch():
     """Co 30 minut sprawdza czy czyiś urlop się skończył i ustawia go z powrotem na aktywny."""
     record = await fetch_full_record()
