@@ -912,7 +912,11 @@ def _parse_date(date_str: str):
 
 @tasks.loop(minutes=1)
 async def leave_expiry_watch():
-    """Co 30 minut sprawdza czy czyiś urlop się skończył i ustawia go z powrotem na aktywny."""
+    """Co minutę sprawdza czy czyiś urlop się skończył i ustawia go z powrotem na aktywny."""
+    await _run_leave_expiry()
+
+async def _run_leave_expiry():
+    """Właściwa logika sprawdzania wygasłych urlopów — wywoływana przez task i komendy."""
     record = await fetch_full_record()
     if not record:
         return
@@ -1362,7 +1366,7 @@ class LSPDCog(commands.Cog):
         on_leave_before = [(o.get("name"), o.get("leaveEndDate")) for o in officers if o.get("onLeave")]
 
         # Odpal sprawdzenie
-        await leave_expiry_watch()
+        await _run_leave_expiry()
 
         # Pobierz stan PO
         record2 = await fetch_full_record()
