@@ -1525,7 +1525,7 @@ class PodanieModal(nextcord.ui.Modal):
             required=True, max_length=150,
         )
         self.doswiadczenie = nextcord.ui.TextInput(
-            label="Doświadczenie jako funkcjonariusz policji? [IC]",
+            label="Doświadczenie jako funkcjonariusz [IC]",
             placeholder="Opisz swoje doświadczenie w formie IC...",
             style=nextcord.TextInputStyle.paragraph,
             required=True, max_length=1000,
