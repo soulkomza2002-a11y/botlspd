@@ -1240,10 +1240,13 @@ async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bo
 
 # ─── TASK: AUTOMATYCZNE KOŃCZENIE URLOPÓW ────────────────────────────────────
 def _parse_date(date_str: str):
-    """Parsuje datę w formacie d/m/Y lub dd/mm/yyyy."""
-    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%-d/%-m/%Y"):
+    """Parsuje datę w formacie d/m/Y, d.m.Y, d/m/yy, d.m.yy."""
+    if not date_str:
+        return None
+    normalized = date_str.strip().replace(".", "/")
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%-d/%-m/%Y", "%-d/%-m/%y"):
         try:
-            return datetime.strptime(date_str.strip(), fmt)
+            return datetime.strptime(normalized, fmt)
         except ValueError:
             continue
     return None
