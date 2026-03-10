@@ -2334,17 +2334,26 @@ class SzkoleniaFormModal(nextcord.ui.Modal):
     async def callback(self, interaction: nextcord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        zdajacy_name      = self.zdajacy.value.strip()
+        zdajacy_name       = self.zdajacy.value.strip()
         szkoleniowiec_name = self.szkoleniowiec.value.strip()
-        guild             = interaction.guild
+        guild              = interaction.guild
 
-        # Szukaj szkoleniowca po nazwie na Discordzie (nick zawiera imię i nazwisko)
         officers = await fetch_officers()
-        nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
-        # nick_to_member uzupełniony o display_name
+        nick_to_member    = {m.name.lower(): m for m in guild.members if not m.bot}
         display_to_member = {m.display_name.lower(): m for m in guild.members if not m.bot}
 
-        # Znajdź oficera-szkoleniowca po imieniu w bazie
+        # ── Szukaj zdającego w bazie (żeby go potem powiadomić) ──────────────
+        zdajacy_officer = next(
+            (o for o in officers
+             if (o.get("name") or "").strip().lower() == zdajacy_name.lower()),
+            None
+        )
+        zdajacy_member = None
+        if zdajacy_officer:
+            nick = (zdajacy_officer.get("nick") or "").strip().lower()
+            zdajacy_member = nick_to_member.get(nick) or display_to_member.get(nick)
+
+        # ── Szukaj szkoleniowca w bazie ────────────────────────────────────────
         trainer_officer = next(
             (o for o in officers
              if (o.get("name") or "").strip().lower() == szkoleniowiec_name.lower()),
@@ -2356,24 +2365,47 @@ class SzkoleniaFormModal(nextcord.ui.Modal):
             trainer_member = nick_to_member.get(nick) or display_to_member.get(nick)
 
         if not trainer_member:
-            # fallback: szukaj po display_name bezpośrednio
             trainer_member = display_to_member.get(szkoleniowiec_name.lower())
 
-        if not trainer_member:
+        # ── Błąd: nie znaleziono szkoleniowca — pokaż podobne nazwiska ────────
+        if not trainer_officer and not trainer_member:
+            # Znajdź podobnych oficerów (pierwsze słowo nazwiska pasuje)
+            query_parts = szkoleniowiec_name.lower().split()
+            similar = [
+                o.get("name") for o in officers
+                if o.get("name") and any(
+                    part in (o.get("name") or "").lower()
+                    for part in query_parts
+                )
+            ][:5]
+
+            hint = ""
+            if similar:
+                hint = "\n\n🔍 **Może chodziło Ci o:**\n" + "\n".join(f"• {n}" for n in similar)
+
             await interaction.followup.send(
-                f"❌ Nie znaleziono szkoleniowca **{szkoleniowiec_name}** na Discordzie.\n"
-                f"Upewnij się, że imię i nazwisko jest poprawne i że szkoleniowiec jest na serwerze.",
+                f"❌ **Nie znaleziono szkoleniowca o nazwie „{szkoleniowiec_name}" w bazie danych.**\n"
+                f"Sprawdź czy wpisałeś poprawne imię i nazwisko (tak jak widnieje w bazie).{hint}",
                 ephemeral=True
             )
             return
 
-        # Wyślij DM do szkoleniowca z przyciskami Tak/Nie
+        if not trainer_member:
+            await interaction.followup.send(
+                f"❌ Znaleziono **{szkoleniowiec_name}** w bazie, ale nie można go znaleźć na Discordzie.\n"
+                f"Upewnij się, że jest na serwerze i ma ustawiony prawidłowy nick.",
+                ephemeral=True
+            )
+            return
+
+        # ── Wyślij DM do szkoleniowca ─────────────────────────────────────────
         try:
             view = SzkoleniaDecisionView(
                 zdajacy_name=zdajacy_name,
                 szkoleniowiec_name=szkoleniowiec_name,
                 training_name=self.training_name,
                 training_key=self.training_key,
+                zdajacy_member_id=zdajacy_member.id if zdajacy_member else None,
             )
             embed = nextcord.Embed(
                 title="🎓 Potwierdzenie szkolenia",
@@ -2386,7 +2418,8 @@ class SzkoleniaFormModal(nextcord.ui.Modal):
             embed.set_footer(text="LSPD FTD — System Szkoleń")
             await trainer_member.send(embed=embed, view=view)
             await interaction.followup.send(
-                f"✅ Wysłano zapytanie do szkoleniowca **{szkoleniowiec_name}**.",
+                f"✅ Wysłano zapytanie do szkoleniowca **{szkoleniowiec_name}**.\n"
+                f"Czekaj na jego odpowiedź — dostaniesz wiadomość z wynikiem.",
                 ephemeral=True
             )
             log.info(f"[SZKOLENIA] Zapytanie do {szkoleniowiec_name} o szkolenie {self.training_name} dla {zdajacy_name}")
@@ -2403,12 +2436,13 @@ class SzkoleniaFormModal(nextcord.ui.Modal):
 class SzkoleniaDecisionView(nextcord.ui.View):
     """Przyciski Tak/Nie wysyłane do szkoleniowca w DM."""
     def __init__(self, zdajacy_name: str, szkoleniowiec_name: str,
-                 training_name: str, training_key: str):
+                 training_name: str, training_key: str, zdajacy_member_id: int | None = None):
         super().__init__(timeout=86400)  # 24h timeout
         self.zdajacy_name       = zdajacy_name
         self.szkoleniowiec_name = szkoleniowiec_name
         self.training_name      = training_name
         self.training_key       = training_key
+        self.zdajacy_member_id  = zdajacy_member_id
 
     async def _disable_all(self, message):
         for item in self.children:
@@ -2417,6 +2451,41 @@ class SzkoleniaDecisionView(nextcord.ui.View):
             await message.edit(view=self)
         except Exception:
             pass
+
+    async def _notify_zdajacy(self, result: bool):
+        """Wyślij DM do zdającego z wynikiem szkolenia."""
+        if not self.zdajacy_member_id:
+            return
+        try:
+            zdajacy_member = bot.get_user(self.zdajacy_member_id)
+            if not zdajacy_member:
+                zdajacy_member = await bot.fetch_user(self.zdajacy_member_id)
+            if result:
+                embed = nextcord.Embed(
+                    title="✅ Szkolenie zaliczone!",
+                    description=(
+                        f"Gratulacje! Szkoleniowiec **{self.szkoleniowiec_name}** potwierdził, "
+                        f"że zdałeś szkolenie **{self.training_name}**.\n\n"
+                        f"Szkolenie zostało zapisane w Twojej teczce. 🎓"
+                    ),
+                    color=0x2ecc71,
+                    timestamp=datetime.utcnow()
+                )
+            else:
+                embed = nextcord.Embed(
+                    title="❌ Szkolenie niezaliczone",
+                    description=(
+                        f"Szkoleniowiec **{self.szkoleniowiec_name}** poinformował, "
+                        f"że nie zdałeś szkolenia **{self.training_name}**.\n\n"
+                        f"W razie wątpliwości skontaktuj się bezpośrednio ze szkoleniowcem."
+                    ),
+                    color=0xe74c3c,
+                    timestamp=datetime.utcnow()
+                )
+            embed.set_footer(text="LSPD FTD — System Szkoleń")
+            await zdajacy_member.send(embed=embed)
+        except Exception as e:
+            log.warning(f"[SZKOLENIA] Nie udało się powiadomić zdającego ({self.zdajacy_member_id}): {e}")
 
     @nextcord.ui.button(label="✅ Tak", style=nextcord.ButtonStyle.success, custom_id="szkolenie_tak")
     async def btn_tak(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
@@ -2432,8 +2501,8 @@ class SzkoleniaDecisionView(nextcord.ui.View):
         )
         if not officer:
             await interaction.followup.send(
-                f"❌ Nie znaleziono oficera **{self.zdajacy_name}** w bazie danych!",
-                ephemeral=False
+                f"❌ Nie znaleziono oficera **{self.zdajacy_name}** w bazie danych!\n"
+                f"Skontaktuj się z administratorem — wpis może być konieczny ręcznie.",
             )
             return
 
@@ -2442,6 +2511,7 @@ class SzkoleniaDecisionView(nextcord.ui.View):
             await interaction.followup.send(
                 f"✅ Zatwierdzone! **{self.zdajacy_name}** został oznaczony jako posiadający szkolenie **{self.training_name}** w bazie.",
             )
+            await self._notify_zdajacy(result=True)
             log.info(f"[SZKOLENIA] {self.zdajacy_name} zaliczył {self.training_name} — potwierdził {self.szkoleniowiec_name}")
         else:
             await interaction.followup.send(
@@ -2455,6 +2525,7 @@ class SzkoleniaDecisionView(nextcord.ui.View):
         await interaction.followup.send(
             f"❌ Odrzucono. **{self.zdajacy_name}** nie zaliczył szkolenia **{self.training_name}**.",
         )
+        await self._notify_zdajacy(result=False)
         log.info(f"[SZKOLENIA] {self.zdajacy_name} NIE zaliczył {self.training_name} — potwierdził {self.szkoleniowiec_name}")
 
 
