@@ -280,7 +280,7 @@ def build_nickname(officer: dict) -> str:
 def officer_map_from(officers: list) -> dict:
     return {(o.get("nick") or "").strip().lower(): o for o in officers if o.get("nick")}
 
-# ─── KOLEJNOŚĆ STOPNI (Cadet=najniższy, Chief=najwyższy) ────────────────────
+# ─── KOLEJNOŚĆ STOPNI ────────────────────────────────────────────────────────
 RANK_ORDER_BOT = [
     "Cadet", "Officer I", "Officer II", "Officer III", "Officer III+1",
     "Sergeant", "Staff Sergeant", "Master Sergeant",
@@ -288,61 +288,92 @@ RANK_ORDER_BOT = [
     "Captain", "Commander", "Deputy Chief", "Assistant Chief", "Chief of Police"
 ]
 
-async def announce_rank_change(
-    guild: nextcord.Guild,
-    officer: dict,
-    old_rank: str,
-    new_rank: str,
-    old_badge: str,
-    new_badge: str,
-):
-    """
-    Wysyła embed na kanał awansów lub degradacji.
-    UWAGA: NIE jest wywoływana automatycznie podczas sync —
-    ogłoszenia wychodzą wyłącznie po zaznaczeniu checkboxa w panelu webowym.
-    Można wywołać ręcznie np. przez slash command w przyszłości.
-    """
-    old_idx = RANK_ORDER_BOT.index(old_rank) if old_rank in RANK_ORDER_BOT else -1
-    new_idx = RANK_ORDER_BOT.index(new_rank) if new_rank in RANK_ORDER_BOT else -1
-    if old_idx == -1 or new_idx == -1 or old_idx == new_idx:
+# ─── WATCHER OGŁOSZEŃ AWANSÓW / DEGRADACJI ───────────────────────────────────
+# Panel webowy zapisuje pendingAnnounce do oficera w Supabase.
+# Bot co minutę sprawdza czy ktoś ma tę flagę, wysyła embed z member.mention
+# i czyści flagę żeby nie wysłać drugi raz.
+
+async def process_pending_announces(guild: nextcord.Guild):
+    record = await fetch_full_record()
+    if not record:
+        return
+    officers = record.get("officers", [])
+
+    pending = [o for o in officers if o.get("pendingAnnounce")]
+    if not pending:
         return
 
-    is_promotion = new_idx > old_idx   # wyższy indeks = wyższy stopień
-    channel_id   = AWANS_CHANNEL_ID if is_promotion else DEGRADACJA_CHANNEL_ID
-    channel      = guild.get_channel(channel_id)
-    if not channel:
-        log.warning(f"[ANNOUNCE] Kanał {channel_id} nie znaleziony!")
-        return
+    log.info(f"[ANNOUNCE] Znaleziono {len(pending)} oczekujących ogłoszeń")
 
-    name  = officer.get("name", "—")
-    nick  = (officer.get("nick") or "").strip().lower()
-    color = 0x2ecc71 if is_promotion else 0xe74c3c
-    emoji = "⬆️" if is_promotion else "⬇️"
-    label = "AWANS" if is_promotion else "DEGRADACJA"
+    # Mapa nick → member
+    nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
+    dirty = False
 
-    # Oznacz osobę po nicku Discord
-    member = next((m for m in guild.members if not m.bot and m.name.lower() == nick), None)
-    ping   = member.mention if member else f"@{officer.get('nick', '—')}"
+    for officer in pending:
+        ann       = officer["pendingAnnounce"]
+        old_rank  = ann.get("oldRank", "—")
+        new_rank  = ann.get("newRank", "—")
+        old_badge = ann.get("oldBadge", "")
+        new_badge = ann.get("newBadge", "")
+        ann_type  = ann.get("type", "AWANS")
 
-    embed = nextcord.Embed(title=f"{emoji} {label} — {name}", color=color, timestamp=datetime.utcnow())
-    embed.add_field(name="👤 Funkcjonariusz",    value=name or "—",                                inline=True)
-    embed.add_field(name="🔖 Nick OOC",          value=officer.get("nick") or "—",                inline=True)
-    embed.add_field(name="​",               value="​",                                   inline=True)
-    embed.add_field(name="📉 Poprzedni stopień", value=old_rank or "—",                           inline=True)
-    embed.add_field(name="📈 Nowy stopień",      value=new_rank or "—",                           inline=True)
-    embed.add_field(name="​",               value="​",                                   inline=True)
-    embed.add_field(name="🪪 Stara odznaka",     value=f"#{old_badge}" if old_badge else "—",     inline=True)
-    embed.add_field(name="🆕 Nowa odznaka",      value=f"#{new_badge}" if new_badge else "—",     inline=True)
-    embed.add_field(name="​",               value="​",                                   inline=True)
-    embed.set_footer(text="LSPD — System zarządzania")
+        is_promotion = ann_type == "AWANS"
+        channel_id   = AWANS_CHANNEL_ID if is_promotion else DEGRADACJA_CHANNEL_ID
+        channel      = guild.get_channel(channel_id)
+        if not channel:
+            log.warning(f"[ANNOUNCE] Kanał {channel_id} nie znaleziony!")
+            officer.pop("pendingAnnounce", None)
+            dirty = True
+            continue
 
-    try:
-        await channel.send(content=ping, embed=embed)
-        log.info(f"[ANNOUNCE] {label}: {name} {old_rank}→{new_rank} #{old_badge}→#{new_badge}")
-    except nextcord.Forbidden:
-        log.error(f"[ANNOUNCE] Brak uprawnień do kanału {channel_id}")
-    except Exception as e:
-        log.error(f"[ANNOUNCE] Błąd: {e}")
+        name  = officer.get("name", "—")
+        nick  = (officer.get("nick") or "").strip().lower()
+        color = 0x2ecc71 if is_promotion else 0xe74c3c
+        emoji = "⬆️" if is_promotion else "⬇️"
+        label = "AWANS" if is_promotion else "DEGRADACJA"
+
+        # Prawdziwy Discord mention przez member.mention
+        member = nick_to_member.get(nick)
+        ping   = member.mention if member else f"@{officer.get('nick', name)}"
+
+        embed = nextcord.Embed(
+            title=f"{emoji} {label} — {name}",
+            color=color,
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="👤 Funkcjonariusz",    value=name or "—",                              inline=True)
+        embed.add_field(name="🔖 Nick OOC",          value=officer.get("nick") or "—",               inline=True)
+        embed.add_field(name="​",               value="​",                                  inline=True)
+        embed.add_field(name="📉 Poprzedni stopień", value=old_rank,                                  inline=True)
+        embed.add_field(name="📈 Nowy stopień",      value=new_rank,                                  inline=True)
+        embed.add_field(name="​",               value="​",                                  inline=True)
+        embed.add_field(name="🪪 Stara odznaka",     value=f"#{old_badge}" if old_badge else "—",    inline=True)
+        embed.add_field(name="🆕 Nowa odznaka",      value=f"#{new_badge}" if new_badge else "—",    inline=True)
+        embed.add_field(name="​",               value="​",                                  inline=True)
+        embed.set_footer(text="LSPD — System zarządzania")
+
+        try:
+            await channel.send(content=ping, embed=embed)
+            log.info(f"[ANNOUNCE] ✅ {label}: {name} ({old_rank}→{new_rank}) #{old_badge}→#{new_badge} | ping: {ping}")
+        except Exception as e:
+            log.error(f"[ANNOUNCE] ❌ Błąd wysyłania: {e}")
+
+        # Wyczyść flagę niezależnie od sukcesu — żeby nie spamować
+        officer.pop("pendingAnnounce", None)
+        dirty = True
+
+    if dirty:
+        # Bezpieczny zapis — pobierz świeży rekord i nałóż tylko usunięcie pendingAnnounce
+        fresh = await fetch_full_record()
+        if fresh:
+            fresh_officers = fresh.get("officers", [])
+            for fo in fresh_officers:
+                fo.pop("pendingAnnounce", None)
+            ok = await save_full_record({"officers": fresh_officers})
+            if ok:
+                log.info(f"[ANNOUNCE] Wyczyszczono pendingAnnounce dla {len(pending)} oficerów")
+            else:
+                log.error("[ANNOUNCE] Błąd zapisu po wyczyszczeniu pendingAnnounce")
 
 # ─── SYNC LOGIC ───────────────────────────────────────────────────────────────
 async def sync_roles(guild: nextcord.Guild) -> dict:
@@ -578,6 +609,16 @@ async def iad_akta_watch():
 
 @iad_akta_watch.before_loop
 async def before_iad_watch():
+    await bot.wait_until_ready()
+
+@tasks.loop(minutes=1)
+async def announce_watch():
+    guild = bot.get_guild(GUILD_ID)
+    if guild:
+        await process_pending_announces(guild)
+
+@announce_watch.before_loop
+async def before_announce_watch():
     await bot.wait_until_ready()
 
 async def update_status():
@@ -1272,6 +1313,8 @@ async def on_ready():
         auto_sync.start()
     if not iad_akta_watch.is_running():
         iad_akta_watch.start()
+    if not announce_watch.is_running():
+        announce_watch.start()
     guild = bot.get_guild(GUILD_ID)
     if guild:
         await check_new_akta(guild)
