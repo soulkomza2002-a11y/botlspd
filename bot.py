@@ -1195,6 +1195,18 @@ async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bo
             new_embed.title = "⚠️ WNIOSEK NIEAKTUALNY (data minęła)"
             new_embed.set_footer(text=f"{embed.footer.text if embed.footer else ''} • Sprawdził: {interaction.user.name}")
             await msg.edit(embed=new_embed, view=None)
+            # Powiadom wnioskodawcę na PW
+            if applicant_id:
+                member = interaction.guild.get_member(applicant_id)
+                if member:
+                    try:
+                        await member.send(
+                            f"⚠️ Twój wniosek o urlop został odrzucony przez {interaction.user.mention}, "
+                            f"ponieważ podana data zakończenia (**{end_date_str}**) już minęła.\n"
+                            f"Złóż wniosek ponownie z poprawną datą."
+                        )
+                    except Exception:
+                        pass
             return
         officer["onLeave"]      = True
         officer["leaveEndDate"] = end_date_str
