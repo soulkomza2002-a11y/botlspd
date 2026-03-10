@@ -1569,7 +1569,7 @@ class PodanieModal(nextcord.ui.Modal):
                         value=self.rp_exp.value,       inline=False)
         embed.set_footer(text=f"Składający: {interaction.user.name} • ID: {interaction.user.id}")
 
-        await channel.send(embed=embed, view=PodanieDecisionView())
+        await channel.send(content=f"{interaction.user.mention}", embed=embed, view=PodanieDecisionView())
         await interaction.response.send_message(
             "✅ Twoje podanie zostało wysłane! Poczekaj na decyzję rekruterów.",
             ephemeral=True
