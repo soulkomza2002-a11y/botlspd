@@ -2384,7 +2384,7 @@ class SzkoleniaFormModal(nextcord.ui.Modal):
                 hint = "\n\n🔍 **Może chodziło Ci o:**\n" + "\n".join(f"• {n}" for n in similar)
 
             await interaction.followup.send(
-                f"❌ **Nie znaleziono szkoleniowca o nazwie „{szkoleniowiec_name}" w bazie danych.**\n"
+                f"❌ **Nie znaleziono szkoleniowca o nazwie '{szkoleniowiec_name}' w bazie danych.**\n"
                 f"Sprawdź czy wpisałeś poprawne imię i nazwisko (tak jak widnieje w bazie).{hint}",
                 ephemeral=True
             )
