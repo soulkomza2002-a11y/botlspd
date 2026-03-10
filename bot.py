@@ -815,6 +815,7 @@ class UrlopObecnyView(nextcord.ui.View):
         old_end = officer.get("leaveEndDate", "—")
         officer["onLeave"] = False
         officer["leaveEndDate"] = ""
+        officer["leaveStartDate"] = ""
         ok = await save_full_record({"officers": officers})
         if not ok:
             await interaction.response.send_message("❌ Błąd zapisu do bazy danych.", ephemeral=True)
@@ -1111,6 +1112,7 @@ async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bo
         return
     officer_name = ""
     end_date_str = ""
+    start_date_str = ""
     applicant_id = None
 
     for field in embed.fields:
@@ -1118,6 +1120,8 @@ async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bo
             officer_name = field.value.strip()
         if "Zakończenie" in field.name:
             end_date_str = field.value.strip()
+        if "Rozpoczęcie" in field.name:
+            start_date_str = field.value.strip()
 
     # Pobierz applicant_id ze stopki
     if embed.footer and embed.footer.text:
@@ -1208,8 +1212,9 @@ async def _handle_urlop_decision(interaction: nextcord.Interaction, accepted: bo
                     except Exception:
                         pass
             return
-        officer["onLeave"]      = True
-        officer["leaveEndDate"] = end_date_str
+        officer["onLeave"]        = True
+        officer["leaveEndDate"]   = end_date_str
+        officer["leaveStartDate"] = start_date_str
         ok = await save_full_record({"officers": officers})
         if not ok:
             await interaction.response.send_message("❌ Błąd zapisu do bazy danych.", ephemeral=True)
@@ -1269,8 +1274,9 @@ async def _run_leave_expiry():
             continue
         # Urlop kończy się po tym dniu (włącznie), więc zdejmujemy następnego dnia
         if now.date() > end_dt.date():
-            o["onLeave"]      = False
-            o["leaveEndDate"] = ""
+            o["onLeave"]        = False
+            o["leaveEndDate"]   = ""
+            o["leaveStartDate"] = ""
             changed.append(o.get("name", "?"))
 
     if changed:
