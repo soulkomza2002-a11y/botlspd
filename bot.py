@@ -2506,7 +2506,10 @@ class SzkoleniaDecisionView(nextcord.ui.View):
             )
             return
 
-        success = await update_officer(officer["id"], {self.training_key: True})
+        success = await update_officer(officer["id"], {
+            self.training_key: True,
+            f"{self.training_key}_fto": self.szkoleniowiec_name,
+        })
         if success:
             await interaction.followup.send(
                 f"✅ Zatwierdzone! **{self.zdajacy_name}** został oznaczony jako posiadający szkolenie **{self.training_name}** w bazie.",
