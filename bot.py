@@ -2509,6 +2509,7 @@ class SzkoleniaDecisionView(nextcord.ui.View):
         success = await update_officer(officer["id"], {
             self.training_key: True,
             f"{self.training_key}_fto": self.szkoleniowiec_name,
+            f"{self.training_key}_date": datetime.utcnow().strftime("%Y-%m-%d"),
         })
         if success:
             await interaction.followup.send(
