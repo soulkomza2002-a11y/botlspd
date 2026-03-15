@@ -635,6 +635,7 @@ async def before_iad_watch():
     await bot.wait_until_ready()
 
 ZWOLNIENIA_CHANNEL_ID = 1473743297288868025   # kanał zwolnień
+FIRED_KEEP_ROLE_ID    = 1473730397425897695   # jedyna rola która zostaje
 
 async def process_pending_fire(guild: nextcord.Guild):
     """Sprawdza pendingFire w Supabase i wysyła ogłoszenia zwolnień z pingiem."""
@@ -650,9 +651,9 @@ async def process_pending_fire(guild: nextcord.Guild):
     channel = guild.get_channel(ZWOLNIENIA_CHANNEL_ID)
     if not channel:
         log.warning(f"[FIRE] Kanał {ZWOLNIENIA_CHANNEL_ID} nie znaleziony!")
-        return
 
     nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
+    keep_role      = guild.get_role(FIRED_KEEP_ROLE_ID)
 
     for entry in pending:
         name   = entry.get("name",   "—")
@@ -664,26 +665,58 @@ async def process_pending_fire(guild: nextcord.Guild):
         member = nick_to_member.get(nick)
         ping   = member.mention if member else f"@{entry.get('nick', name)}"
 
-        embed = nextcord.Embed(
-            title="🔴 ZWOLNIENIE — " + name,
-            color=0xe74c3c,
-            timestamp=datetime.utcnow()
-        )
-        embed.add_field(name="👤 Funkcjonariusz", value=name,                              inline=True)
-        embed.add_field(name="🔖 Nick OOC",       value=entry.get("nick") or "—",         inline=True)
-        embed.add_field(name="\u200b",            value="\u200b",                           inline=True)
-        embed.add_field(name="🪪 Odznaka",        value=f"#{badge}" if badge else "—",    inline=True)
-        embed.add_field(name="📋 Stopień",        value=rank,                              inline=True)
-        embed.add_field(name="\u200b",            value="\u200b",                           inline=True)
-        if reason:
-            embed.add_field(name="📝 Powód",      value=reason,                            inline=False)
-        embed.set_footer(text="LSPD — System zarządzania")
+        # ── Resetuj pseudonim i role ──────────────────────────────────────────
+        if member:
+            # 1. Reset pseudonimu (nick → None = przywraca nazwę użytkownika)
+            try:
+                await member.edit(nick=None, reason=f"LSPD Bot — zwolnienie: {name}")
+                log.info(f"[FIRE] Reset pseudonimu: {member.name}")
+            except Exception as e:
+                log.warning(f"[FIRE] Nie można zresetować pseudonimu {member.name}: {e}")
 
-        try:
-            await channel.send(content=ping, embed=embed)
-            log.info(f"[FIRE] ✅ Zwolnienie wysłane: {name} ({nick}) | ping: {ping}")
-        except Exception as e:
-            log.error(f"[FIRE] ❌ Błąd wysyłania: {e}")
+            # 2. Wyczyść wszystkie role LSPD — zostaw tylko FIRED_KEEP_ROLE_ID
+            roles_to_remove = [
+                r for r in member.roles
+                if r.name != "@everyone"
+                and r.id != FIRED_KEEP_ROLE_ID
+            ]
+            if roles_to_remove:
+                try:
+                    await member.remove_roles(*roles_to_remove, reason=f"LSPD Bot — zwolnienie: {name}")
+                    log.info(f"[FIRE] Usunięto {len(roles_to_remove)} ról dla {member.name}")
+                except Exception as e:
+                    log.warning(f"[FIRE] Nie można usunąć ról {member.name}: {e}")
+
+            # 3. Upewnij się że ma rolę "zostaje"
+            if keep_role and keep_role not in member.roles:
+                try:
+                    await member.add_roles(keep_role, reason=f"LSPD Bot — zwolnienie: {name}")
+                    log.info(f"[FIRE] Dodano rolę {keep_role.name} dla {member.name}")
+                except Exception as e:
+                    log.warning(f"[FIRE] Nie można dodać roli {keep_role.name} dla {member.name}: {e}")
+
+        # ── Wyślij embed na kanał ─────────────────────────────────────────────
+        if channel:
+            embed = nextcord.Embed(
+                title="🔴 ZWOLNIENIE — " + name,
+                color=0xe74c3c,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="👤 Funkcjonariusz", value=name,                              inline=True)
+            embed.add_field(name="🔖 Nick OOC",       value=entry.get("nick") or "—",         inline=True)
+            embed.add_field(name="\u200b",            value="\u200b",                           inline=True)
+            embed.add_field(name="🪪 Odznaka",        value=f"#{badge}" if badge else "—",    inline=True)
+            embed.add_field(name="📋 Stopień",        value=rank,                              inline=True)
+            embed.add_field(name="\u200b",            value="\u200b",                           inline=True)
+            if reason:
+                embed.add_field(name="📝 Powód",      value=reason,                            inline=False)
+            embed.set_footer(text="LSPD — System zarządzania")
+
+            try:
+                await channel.send(content=ping, embed=embed)
+                log.info(f"[FIRE] ✅ Zwolnienie wysłane: {name} ({nick}) | ping: {ping}")
+            except Exception as e:
+                log.error(f"[FIRE] ❌ Błąd wysyłania: {e}")
 
     # Wyczyść pendingFire po wysłaniu
     ok = await save_full_record({"pendingFire": []})
