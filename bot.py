@@ -634,11 +634,71 @@ async def iad_akta_watch():
 async def before_iad_watch():
     await bot.wait_until_ready()
 
+ZWOLNIENIA_CHANNEL_ID = 1473743297288868025   # kanał zwolnień
+
+async def process_pending_fire(guild: nextcord.Guild):
+    """Sprawdza pendingFire w Supabase i wysyła ogłoszenia zwolnień z pingiem."""
+    record = await fetch_full_record()
+    if not record:
+        return
+    pending = record.get("pendingFire", [])
+    if not pending:
+        return
+
+    log.info(f"[FIRE] Znaleziono {len(pending)} oczekujących zwolnień")
+
+    channel = guild.get_channel(ZWOLNIENIA_CHANNEL_ID)
+    if not channel:
+        log.warning(f"[FIRE] Kanał {ZWOLNIENIA_CHANNEL_ID} nie znaleziony!")
+        return
+
+    nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
+
+    for entry in pending:
+        name   = entry.get("name",   "—")
+        nick   = (entry.get("nick") or "").strip().lower()
+        badge  = entry.get("badge",  "")
+        rank   = entry.get("rank",   "—")
+        reason = entry.get("reason", "").strip()
+
+        member = nick_to_member.get(nick)
+        ping   = member.mention if member else f"@{entry.get('nick', name)}"
+
+        embed = nextcord.Embed(
+            title="🔴 ZWOLNIENIE — " + name,
+            color=0xe74c3c,
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="👤 Funkcjonariusz", value=name,                              inline=True)
+        embed.add_field(name="🔖 Nick OOC",       value=entry.get("nick") or "—",         inline=True)
+        embed.add_field(name="\u200b",            value="\u200b",                           inline=True)
+        embed.add_field(name="🪪 Odznaka",        value=f"#{badge}" if badge else "—",    inline=True)
+        embed.add_field(name="📋 Stopień",        value=rank,                              inline=True)
+        embed.add_field(name="\u200b",            value="\u200b",                           inline=True)
+        if reason:
+            embed.add_field(name="📝 Powód",      value=reason,                            inline=False)
+        embed.set_footer(text="LSPD — System zarządzania")
+
+        try:
+            await channel.send(content=ping, embed=embed)
+            log.info(f"[FIRE] ✅ Zwolnienie wysłane: {name} ({nick}) | ping: {ping}")
+        except Exception as e:
+            log.error(f"[FIRE] ❌ Błąd wysyłania: {e}")
+
+    # Wyczyść pendingFire po wysłaniu
+    ok = await save_full_record({"pendingFire": []})
+    if ok:
+        log.info(f"[FIRE] Wyczyszczono pendingFire ({len(pending)} wpisów)")
+    else:
+        log.error("[FIRE] Błąd czyszczenia pendingFire")
+
+
 @tasks.loop(minutes=1)
 async def announce_watch():
     guild = bot.get_guild(GUILD_ID)
     if guild:
         await process_pending_announces(guild)
+        await process_pending_fire(guild)
 
 @announce_watch.before_loop
 async def before_announce_watch():
