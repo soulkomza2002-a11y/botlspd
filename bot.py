@@ -1861,7 +1861,228 @@ class LSPDCog(commands.Cog):
         await channel.send(embed=embed, view=PodaniePanelView())
         await interaction.response.send_message(f"✅ Panel podań wysłany na {channel.mention}.", ephemeral=True)
 
-    @slash_command(name="urlop-setup", description="Wysyła panel urlopowy LSPD", guild_ids=[GUILD_ID])
+    @slash_command(name="faq-setup", description="Wysyła FAQ na kanał informacyjny LSPD", guild_ids=[GUILD_ID])
+    async def cmd_faq_setup(self, interaction: Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        FAQ_CHANNEL_ID  = 1484390389103333606
+        DATABASE_CH_ID  = 1474455483002654720
+
+        channel = interaction.guild.get_channel(FAQ_CHANNEL_ID)
+        if not channel:
+            await interaction.followup.send(f"❌ Nie znaleziono kanału {FAQ_CHANNEL_ID}.", ephemeral=True)
+            return
+
+        db_ch      = interaction.guild.get_channel(DATABASE_CH_ID)
+        db_mention = db_ch.mention if db_ch else f"<#{DATABASE_CH_ID}>"
+
+        GOLD  = 0xc8a84b
+        BLUE  = 0x1e5fc4
+        RED   = 0xe03030
+        GREEN = 0x2ecc71
+        GRAY  = 0x2c3e50
+
+        # ── Nagłówek ─────────────────────────────────────────────────────────
+        header = nextcord.Embed(
+            description=(
+                "```\n"
+                "  ██╗     ███████╗██████╗ ██████╗\n"
+                "  ██║     ██╔════╝██╔══██╗██╔══██╗\n"
+                "  ██║     ███████╗██████╔╝██║  ██║\n"
+                "  ██║     ╚════██║██╔═══╝ ██║  ██║\n"
+                "  ███████╗███████║██║     ██████╔╝\n"
+                "  ╚══════╝╚══════╝╚═╝     ╚═════╝\n"
+                "```\n"
+                "**Los Santos Police Department — Vespucci Division**\n"
+                "Poniżej znajdziesz wszystkie podstawowe informacje,\n"
+                "które pomogą Ci sprawnie poruszać się w naszych szeregach."
+            ),
+            color=GOLD,
+        )
+        header.set_footer(text="LSPD Vespucci · Tablica Informacyjna")
+        await channel.send(embed=header)
+
+        # ── 1. Klawiszologia ─────────────────────────────────────────────────
+        import pathlib
+        img_path = pathlib.Path("/app/klawiszologia.png")
+        if not img_path.exists():
+            img_path = pathlib.Path("/home/claude/klawiszologia.png")
+
+        embed_klaw = nextcord.Embed(
+            title="🎮  1. Klawiszologia LSPD",
+            description=(
+                "Poniżej znajdziesz mapę klawiszy używanych podczas służby.\n"
+                "**Kliknij obrazek**, aby go powiększyć."
+            ),
+            color=GOLD,
+        )
+        embed_klaw.set_image(url="attachment://klawiszologia.png")
+        embed_klaw.set_footer(text="Tablica Operacyjna · LSPD Vespucci")
+
+        if img_path.exists():
+            with open(img_path, "rb") as f:
+                await channel.send(embed=embed_klaw, file=nextcord.File(f, filename="klawiszologia.png"))
+        else:
+            await channel.send(embed=embed_klaw)
+
+        # ── 2. Komendy ───────────────────────────────────────────────────────
+        embed_cmd = nextcord.Embed(
+            title="⌨️  2. Podstawowe komendy",
+            color=BLUE,
+        )
+        embed_cmd.add_field(
+            name="╔══ KOMENDY SŁUŻBOWE ══╗",
+            value=(
+                "> `/odznaka` — wyświetla Twoją odznakę służbową\n"
+                "> `/lspd [treść]` — ogłoszenie dla obywateli *(Police Announce)*\n"
+                "> `/10-13` — wysyła powiadomienie o byciu **rannym** do pozostałych jednostek i EMS\n"
+                "> `/panic` — wysyła alarm **CODE 0** do wszystkich jednostek\n"
+            ),
+            inline=False,
+        )
+        embed_cmd.set_footer(text="Używaj komend odpowiedzialnie · LSPD Vespucci")
+        await channel.send(embed=embed_cmd)
+
+        # ── 3. Database & Kompendium ─────────────────────────────────────────
+        embed_db = nextcord.Embed(
+            title="🗄️  3. Database & Kompendium",
+            description=f"Wszystkie zasoby znajdziesz w {db_mention}",
+            color=BLUE,
+        )
+        embed_db.add_field(
+            name="📊 Database zawiera m.in.",
+            value=(
+                "• Szkoleniowców FTD i commanderów wydziałów oraz ich zasady rekrutacji\n"
+                "• Cały spis funkcjonariuszy\n"
+                "• Możliwość napisania raportu w dzienniku\n"
+                "• Prowadzących kadetów\n"
+                "• Wypłaty i kalendarz urlopów"
+            ),
+            inline=True,
+        )
+        embed_db.add_field(
+            name="📖 Kompendium zawiera m.in.",
+            value=(
+                "• Wszystkie potrzebne informacje i procedury\n"
+                "• Zdjęcia i nagrania szkoleniowe\n"
+                "• Wymagane szkolenia na dany stopień\n"
+                "• Osobne kompendium dla każdego wydziału"
+            ),
+            inline=True,
+        )
+        embed_db.set_footer(text="LSPD Vespucci · Zasoby służbowe")
+        await channel.send(embed=embed_db)
+
+        # ── 4. Awanse ────────────────────────────────────────────────────────
+        embed_awans = nextcord.Embed(
+            title="⭐  4. Na jakiej podstawie wystawiane są awanse?",
+            color=GREEN,
+            description="Awanse wystawiane są przez **High Command** na podstawie:\n",
+        )
+        embed_awans.add_field(
+            name="\u200b",
+            value=(
+                "✦ Zaangażowania i wyróżniania się na służbie\n"
+                "✦ Wypisanych raportów i godzin w dzienniku\n"
+                "✦ Wyrobionych szkoleń w wydziale\n"
+                "✦ Wypełniania obowiązków wydziałowych"
+            ),
+            inline=False,
+        )
+        embed_awans.set_footer(text="Staraj się, a awans przyjdzie sam · LSPD Vespucci")
+        await channel.send(embed=embed_awans)
+
+        # ── 5. Kadet ─────────────────────────────────────────────────────────
+        embed_kadet = nextcord.Embed(
+            title="🎓  5. Co musi wiedzieć Kadet?",
+            color=RED,
+        )
+        embed_kadet.add_field(
+            name="╔══ ZASADY OBOWIĄZKOWE ══╗",
+            value=(
+                "🚫 **Zakaz** samodzielnego wyjazdu w patrol\n"
+                "🚫 **Zakaz** posiadania broni palnej bez licencji *(licencje wyrabiamy od Oficera I+)*\n"
+                "📅 Tydzień od momentu przyjęcia na zdanie egzaminu oficerskiego — można podejść maksymalnie **2 razy**\n"
+                "👤 Swojego prowadzącego znajdziesz w **Database**\n"
+                "🚫 W trakcie akcji agresywnych **zakaz wysiadania z radiowozu** *(nie wliczasz się do limitu na akcję)*"
+            ),
+            inline=False,
+        )
+        embed_kadet.set_footer(text="Krok po kroku do odznaki · LSPD Vespucci")
+        await channel.send(embed=embed_kadet)
+
+        # ── 6. Norma & Urlop ─────────────────────────────────────────────────
+        embed_norma = nextcord.Embed(
+            title="⏱️  6. Norma godzinowa & Urlopy",
+            color=GRAY,
+            description=(
+                "U nas **nie ma normy godzinowej** — wymagamy jedynie aktywności na Discordzie, "
+                "tzn. zostawiania reakcji na wiadomości.\n\n"
+                "Przy dłuższej nieobecności **zalecamy wypisanie urlopu**, aby uniknąć degradacji."
+            ),
+        )
+        embed_norma.set_footer(text="Dbamy o Twój czas · LSPD Vespucci")
+        await channel.send(embed=embed_norma)
+
+        # ── 7. Zakaz broni ───────────────────────────────────────────────────
+        embed_bron = nextcord.Embed(
+            title="🔫  7. Zakaz broni",
+            color=GRAY,
+            description="🚫 Zakaz korzystania z broni innej niż ta, która znajduje się w **szafce policyjnej**.",
+        )
+        embed_bron.set_footer(text="Dbaj o sprzęt służbowy · LSPD Vespucci")
+        await channel.send(embed=embed_bron)
+
+        # ── 8. Kamizelki ─────────────────────────────────────────────────────
+        embed_kamiz = nextcord.Embed(
+            title="🛡️  8. Kamizelki kuloodporne",
+            color=GRAY,
+            description="✅ Można pobierać **kamizelki kuloodporne** na napady.",
+        )
+        embed_kamiz.set_footer(text="Bezpieczeństwo przede wszystkim · LSPD Vespucci")
+        await channel.send(embed=embed_kamiz)
+
+        # ── 9. Skargi ────────────────────────────────────────────────────────
+        embed_skargi = nextcord.Embed(
+            title="⚖️  9. Skargi na funkcjonariuszy",
+            color=RED,
+            description=(
+                "Wszelkie skargi na funkcjonariuszy składamy do **IAD** *(Internal Affairs Division)*.\n\n"
+                "Rozmowa z **High Command** jest absolutną ostatecznością!"
+            ),
+        )
+        embed_skargi.set_footer(text="IAD — wewnętrzny nadzór · LSPD Vespucci")
+        await channel.send(embed=embed_skargi)
+
+        # ── 10. Zaproszenie znajomego ─────────────────────────────────────────
+        embed_znajomy = nextcord.Embed(
+            title="🤝  10. Chcesz zaprosić znajomego?",
+            color=GREEN,
+            description=(
+                "Jesteśmy **w pełni otwarci** na takie propozycje! 🎉\n\n"
+                "Osoba polecona przez Ciebie może dołączyć **bez pisania podania** — "
+                "wystarczy skontaktować się z **High Command** i przedstawić kandydata."
+            ),
+        )
+        embed_znajomy.set_footer(text="Razem tworzymy LSPD · Vespucci Division")
+        await channel.send(embed=embed_znajomy)
+
+        # ── Stopka ───────────────────────────────────────────────────────────
+        footer_embed = nextcord.Embed(
+            description=(
+                "```\n"
+                "  Los Santos Police Department · Vespucci Division\n"
+                "  Protect and Serve\n"
+                "```"
+            ),
+            color=GOLD,
+        )
+        await channel.send(embed=footer_embed)
+        await interaction.followup.send(f"✅ FAQ zostało wysłane na {channel.mention}!", ephemeral=True)
+        log.info(f"[FAQ] Wysłano FAQ przez {interaction.user.name}")
     async def cmd_urlop_setup(self, interaction: Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ Potrzebujesz uprawnienia **Zarządzaj serwerem**.", ephemeral=True)
