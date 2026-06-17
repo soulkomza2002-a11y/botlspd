@@ -80,8 +80,8 @@ RANK_BADGE_RANGES = {
 
 # ─── BCSO — MAPOWANIE STOPIEŃ → ROLA (po ID, nie po nazwie) ──────────────────
 RANK_ROLE_IDS_BCSO = {
-    "Sheriff":          1491929649968840725,
-    "Undersheriff":     1491929649968840725,
+    "Sheriff":          1490876453628153968,
+    "Undersheriff":     1491930660737388686,
     "Captain":          1491930224798072832,
     "Lieutenant II":    1491930221547491500,
     "Lieutenant I":     1491930217881669652,
