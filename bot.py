@@ -40,7 +40,7 @@ ALL_LSPD_ROLES = set(RANK_TO_ROLE.values())
 
 # ─── MAPOWANIE JEDNOSTKI → ROLA ───────────────────────────────────────────────
 UNIT_TO_ROLE = {
-    "swat": "SWAT",
+    "swat": "METRO",
     "iad":  "IAD",
     "ftd":  "FTD",
     "fac":  "FAC",
@@ -80,8 +80,8 @@ RANK_BADGE_RANGES = {
 
 # ─── BCSO — MAPOWANIE STOPIEŃ → ROLA (po ID, nie po nazwie) ──────────────────
 RANK_ROLE_IDS_BCSO = {
-    "Sheriff":          1490876453628153968,
-    "Undersheriff":     1491930660737388686,
+    "Sheriff":          1491929649968840725,
+    "Undersheriff":     1491929649968840725,
     "Captain":          1491930224798072832,
     "Lieutenant II":    1491930221547491500,
     "Lieutenant I":     1491930217881669652,
