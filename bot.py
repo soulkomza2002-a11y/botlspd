@@ -522,7 +522,20 @@ async def sync_roles(guild: nextcord.Guild) -> dict:
         # ── Jednostki ─────────────────────────────────────────────────────────
         target_unit_roles = set()
         for field, role_name in UNIT_TO_ROLE.items():
-            if officer.get(field):
+            val = officer.get(field)
+            # Jawna obsługa swat → METRO z logiem diagnostycznym
+            if field == "swat":
+                log.info(f"[METRO] {member.name} — officer[swat]={val!r}")
+                if val:
+                    r = guild_roles.get("METRO")
+                    if r:
+                        target_unit_roles.add(r)
+                        log.info(f"[METRO] ✅ Dodano rolę METRO dla {member.name}")
+                    else:
+                        results["errors"].append("Brak roli 'METRO' na serwerze Discord!")
+                        log.error("[METRO] ❌ Rola 'METRO' nie istnieje na serwerze!")
+                continue
+            if val:
                 r = guild_roles.get(role_name)
                 if r:
                     target_unit_roles.add(r)
